@@ -24,7 +24,7 @@ class SoundBridgeGUI:
         # Build window
         self.root = ctk.CTk()
         self.root.title(f"SoundBridge — {mode.capitalize()}")
-        self.root.geometry("420x380")
+        self.root.geometry("480x460")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -118,21 +118,23 @@ class SoundBridgeGUI:
 
         # Buttons
         btn_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        btn_frame.pack(fill=tk.X, padx=12)
+        btn_frame.pack(fill=tk.X, padx=12, pady=(4, 12))
 
         self.connect_btn = ctk.CTkButton(
-            btn_frame, text="Disconnect", command=self._toggle_connection,
+            btn_frame, text="Disconnect", width=130,
+            command=self._toggle_connection,
         )
         self.connect_btn.pack(side=tk.LEFT)
 
         quit_btn = ctk.CTkButton(
-            btn_frame, text="Quit", command=self._on_quit,
+            btn_frame, text="Quit", width=80,
+            command=self._on_quit,
             fg_color="#c0392b", hover_color="#e74c3c",
         )
         quit_btn.pack(side=tk.RIGHT)
 
         minimize_btn = ctk.CTkButton(
-            btn_frame, text="Minimize to Tray",
+            btn_frame, text="Minimize to Tray", width=140,
             command=self._minimize_to_tray,
             fg_color="gray40", hover_color="gray50",
         )
