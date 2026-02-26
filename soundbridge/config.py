@@ -14,8 +14,6 @@ MIC_PORT = 4411
 DISCOVERY_PORT = 4412
 HEARTBEAT_PORT = 4413
 
-BROADCAST_ADDR = "255.255.255.255"
-
 # Protocol
 MAGIC = b"\x53\x42"  # "SB"
 HEADER_SIZE = 8  # magic(2) + type(1) + channels(1) + sample_rate(2) + payload_size(2)

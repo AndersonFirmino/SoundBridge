@@ -2,6 +2,8 @@
 
 import logging
 import socket
+import struct
+import sys
 import threading
 import time
 from typing import Callable
@@ -12,6 +14,96 @@ from . import config
 from . import protocol
 
 logger = logging.getLogger(__name__)
+
+
+def _get_broadcast_addresses() -> list[str]:
+    """Detect broadcast addresses for all active network interfaces.
+
+    Uses OS-specific methods: netifaces/fcntl on Linux, ipconfig parsing
+    on Windows.  Falls back to 255.255.255.255 if detection fails.
+    """
+    addrs: list[str] = []
+
+    if sys.platform == "linux":
+        try:
+            import fcntl
+            import array
+
+            # SIOCGIFCONF — get list of interfaces
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Ask for up to 4096 bytes of interface data
+            buf = array.array("B", b"\0" * 4096)
+            result = fcntl.ioctl(
+                sock.fileno(),
+                0x8912,  # SIOCGIFCONF
+                struct.pack("iL", 4096, buf.buffer_info()[0]),
+            )
+            out_bytes = struct.unpack("iL", result)[0]
+            data = buf.tobytes()[:out_bytes]
+
+            offset = 0
+            while offset < len(data):
+                iface_name = data[offset : offset + 16].split(b"\0", 1)[0]
+                offset += 16 + 16  # skip name + sockaddr
+
+                if not iface_name or iface_name == b"lo":
+                    continue
+
+                try:
+                    # SIOCGIFBRDADDR — get broadcast address
+                    req = struct.pack("256s", iface_name)
+                    res = fcntl.ioctl(sock.fileno(), 0x8919, req)
+                    bcast_ip = socket.inet_ntoa(res[20:24])
+                    if bcast_ip and bcast_ip != "0.0.0.0":
+                        addrs.append(bcast_ip)
+                except OSError:
+                    continue
+
+            sock.close()
+        except Exception:
+            pass
+
+    elif sys.platform == "win32":
+        try:
+            import subprocess
+            output = subprocess.check_output(
+                ["powershell", "-Command",
+                 "Get-NetIPAddress -AddressFamily IPv4 | "
+                 "Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | "
+                 "Select-Object IPAddress, PrefixLength | "
+                 "Format-Table -HideTableHeaders"],
+                text=True, timeout=5,
+            )
+            for line in output.strip().splitlines():
+                parts = line.split()
+                if len(parts) == 2:
+                    ip_str, prefix = parts[0], int(parts[1])
+                    ip_int = struct.unpack("!I", socket.inet_aton(ip_str))[0]
+                    mask = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
+                    bcast_int = ip_int | (~mask & 0xFFFFFFFF)
+                    bcast_ip = socket.inet_ntoa(struct.pack("!I", bcast_int))
+                    if bcast_ip != "255.255.255.255" and ip_str != "127.0.0.1":
+                        addrs.append(bcast_ip)
+        except Exception:
+            pass
+
+    # Also try the cross-platform socket approach as fallback
+    if not addrs:
+        try:
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            if local_ip and not local_ip.startswith("127."):
+                # Assume /24 subnet as common default
+                parts = local_ip.split(".")
+                parts[3] = "255"
+                addrs.append(".".join(parts))
+        except Exception:
+            pass
+
+    if not addrs:
+        addrs.append("255.255.255.255")
+
+    return list(set(addrs))
 
 
 class UDPSender:
@@ -71,7 +163,7 @@ class UDPReceiver:
 
 
 class Discovery:
-    """Discovers peer on the LAN via UDP broadcast."""
+    """Discovers peer on the LAN via UDP subnet broadcast."""
 
     def __init__(self, on_peer_found: Callable[[str], None]):
         self.on_peer_found = on_peer_found
@@ -80,9 +172,14 @@ class Discovery:
         self._recv_thread: threading.Thread | None = None
         self._sock_send: socket.socket | None = None
         self._sock_recv: socket.socket | None = None
+        self._broadcast_addrs: list[str] = []
 
     def start_ping(self):
         """Start sending discovery pings (client mode)."""
+        self._broadcast_addrs = _get_broadcast_addresses()
+        logger.info("Discovery: sending PINGs to %s (port %d)",
+                     self._broadcast_addrs, config.DISCOVERY_PORT)
+
         self._running = True
         self._sock_send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock_send.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -98,12 +195,18 @@ class Discovery:
         self._recv_thread.start()
 
     def _ping_loop(self):
+        ping_count = 0
         while self._running:
             pkt = protocol.encode(config.PKT_DISCOVERY_PING, channels=0, sample_rate=0)
-            try:
-                self._sock_send.sendto(pkt, (config.BROADCAST_ADDR, config.DISCOVERY_PORT))
-            except OSError:
-                pass
+            for bcast in self._broadcast_addrs:
+                try:
+                    self._sock_send.sendto(pkt, (bcast, config.DISCOVERY_PORT))
+                except OSError as e:
+                    logger.debug("Discovery: failed to send PING to %s: %s", bcast, e)
+            ping_count += 1
+            if ping_count % 5 == 0:
+                logger.info("Discovery: sent %d rounds of PINGs, still searching...",
+                             ping_count)
             time.sleep(config.DISCOVERY_INTERVAL)
 
     def _listen_pong(self):
@@ -112,6 +215,7 @@ class Discovery:
                 data, addr = self._sock_recv.recvfrom(128)
                 pkt = protocol.decode(data)
                 if pkt and pkt.pkt_type == config.PKT_DISCOVERY_PONG:
+                    logger.info("Discovery: received PONG from %s", addr[0])
                     self.on_peer_found(addr[0])
             except socket.timeout:
                 continue
@@ -120,6 +224,9 @@ class Discovery:
 
     def start_listen(self):
         """Start listening for discovery pings (server mode)."""
+        logger.info("Discovery: listening for PINGs on port %d",
+                     config.DISCOVERY_PORT)
+
         self._running = True
         self._sock_recv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock_recv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -137,6 +244,8 @@ class Discovery:
                 data, addr = self._sock_recv.recvfrom(128)
                 pkt = protocol.decode(data)
                 if pkt and pkt.pkt_type == config.PKT_DISCOVERY_PING:
+                    logger.info("Discovery: received PING from %s, sending PONG",
+                                 addr[0])
                     pong = protocol.encode(config.PKT_DISCOVERY_PONG, channels=0, sample_rate=0)
                     self._sock_send.sendto(pong, (addr[0], config.DISCOVERY_PORT + 1))
                     self.on_peer_found(addr[0])
