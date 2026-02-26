@@ -339,11 +339,12 @@ class Heartbeat:
 
     def stop(self):
         self._running = False
-        if self._send_thread:
+        current = threading.current_thread()
+        if self._send_thread and self._send_thread is not current:
             self._send_thread.join(timeout=2.0)
-        if self._check_thread:
+        if self._check_thread and self._check_thread is not current:
             self._check_thread.join(timeout=2.0)
-        if hasattr(self, '_recv_thread') and self._recv_thread:
+        if hasattr(self, '_recv_thread') and self._recv_thread and self._recv_thread is not current:
             self._recv_thread.join(timeout=2.0)
         if self._sock:
             self._sock.close()
