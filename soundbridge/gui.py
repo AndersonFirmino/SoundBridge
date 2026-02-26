@@ -1,12 +1,16 @@
-"""Tkinter GUI + system tray for SoundBridge."""
+"""CustomTkinter GUI + system tray for SoundBridge."""
 
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk
+
+import customtkinter as ctk
 
 from . import config
 from .main import SoundBridgeServer, SoundBridgeClient
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
 
 class SoundBridgeGUI:
@@ -18,9 +22,9 @@ class SoundBridgeGUI:
         self._tray_thread = None
 
         # Build window
-        self.root = tk.Tk()
+        self.root = ctk.CTk()
         self.root.title(f"SoundBridge — {mode.capitalize()}")
-        self.root.geometry("400x340")
+        self.root.geometry("420x380")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -31,81 +35,106 @@ class SoundBridgeGUI:
         self._start_bridge()
 
     def _build_ui(self):
-        main_frame = ttk.Frame(self.root, padding=16)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = ctk.CTkFrame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
 
         # Title
-        title_label = ttk.Label(
+        title_label = ctk.CTkLabel(
             main_frame, text="SoundBridge",
-            font=("Segoe UI", 18, "bold") if sys.platform == "win32"
-            else ("Sans", 18, "bold"),
+            font=("Segoe UI", 22, "bold") if sys.platform == "win32"
+            else ("Sans", 22, "bold"),
         )
-        title_label.pack(pady=(0, 4))
+        title_label.pack(pady=(12, 4))
 
-        mode_label = ttk.Label(
+        mode_label = ctk.CTkLabel(
             main_frame,
             text=f"Mode: {self.mode.upper()}",
-            font=("Segoe UI", 10) if sys.platform == "win32" else ("Sans", 10),
+            font=("Segoe UI", 12) if sys.platform == "win32" else ("Sans", 12),
         )
         mode_label.pack(pady=(0, 12))
 
-        # Status frame
-        status_frame = ttk.LabelFrame(main_frame, text="Connection", padding=8)
-        status_frame.pack(fill=tk.X, pady=(0, 12))
+        # Status frame (replaces LabelFrame)
+        status_frame = ctk.CTkFrame(main_frame)
+        status_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        status_header = ctk.CTkLabel(
+            status_frame, text="Connection",
+            font=("Segoe UI", 13, "bold") if sys.platform == "win32"
+            else ("Sans", 13, "bold"),
+        )
+        status_header.pack(anchor=tk.W, padx=10, pady=(8, 4))
 
         self.status_var = tk.StringVar(value="Searching for peer...")
-        self.status_label = ttk.Label(status_frame, textvariable=self.status_var)
-        self.status_label.pack(anchor=tk.W)
+        self.status_label = ctk.CTkLabel(
+            status_frame, textvariable=self.status_var,
+        )
+        self.status_label.pack(anchor=tk.W, padx=10)
 
         self.peer_var = tk.StringVar(value="Peer: —")
-        self.peer_label = ttk.Label(status_frame, textvariable=self.peer_var)
-        self.peer_label.pack(anchor=tk.W)
+        self.peer_label = ctk.CTkLabel(
+            status_frame, textvariable=self.peer_var,
+        )
+        self.peer_label.pack(anchor=tk.W, padx=10)
 
         # Status indicator
         self.indicator_var = tk.StringVar(value="  DISCONNECTED")
-        self.indicator_label = ttk.Label(
+        self.indicator_label = ctk.CTkLabel(
             status_frame, textvariable=self.indicator_var,
-            foreground="red",
+            text_color="red",
         )
-        self.indicator_label.pack(anchor=tk.W, pady=(4, 0))
+        self.indicator_label.pack(anchor=tk.W, padx=10, pady=(4, 8))
 
-        # Volume controls
-        vol_frame = ttk.LabelFrame(main_frame, text="Volume", padding=8)
-        vol_frame.pack(fill=tk.X, pady=(0, 12))
+        # Volume controls (replaces LabelFrame)
+        vol_frame = ctk.CTkFrame(main_frame)
+        vol_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        vol_header = ctk.CTkLabel(
+            vol_frame, text="Volume",
+            font=("Segoe UI", 13, "bold") if sys.platform == "win32"
+            else ("Sans", 13, "bold"),
+        )
+        vol_header.pack(anchor=tk.W, padx=10, pady=(8, 4))
 
         if self.mode == "server":
-            # Server controls remote mic volume
-            ttk.Label(vol_frame, text="Remote Mic:").pack(anchor=tk.W)
+            ctk.CTkLabel(vol_frame, text="Remote Mic:").pack(
+                anchor=tk.W, padx=10,
+            )
             self.mic_vol_var = tk.DoubleVar(value=100.0)
-            mic_slider = ttk.Scale(
+            mic_slider = ctk.CTkSlider(
                 vol_frame, from_=0, to=100, variable=self.mic_vol_var,
-                orient=tk.HORIZONTAL, command=self._on_mic_vol_change,
+                orientation="horizontal", command=self._on_mic_vol_change,
             )
-            mic_slider.pack(fill=tk.X, pady=(0, 4))
+            mic_slider.pack(fill=tk.X, padx=10, pady=(0, 8))
         else:
-            # Client controls audio playback volume
-            ttk.Label(vol_frame, text="Audio Output:").pack(anchor=tk.W)
-            self.audio_vol_var = tk.DoubleVar(value=100.0)
-            audio_slider = ttk.Scale(
-                vol_frame, from_=0, to=100, variable=self.audio_vol_var,
-                orient=tk.HORIZONTAL, command=self._on_audio_vol_change,
+            ctk.CTkLabel(vol_frame, text="Audio Output:").pack(
+                anchor=tk.W, padx=10,
             )
-            audio_slider.pack(fill=tk.X, pady=(0, 4))
+            self.audio_vol_var = tk.DoubleVar(value=100.0)
+            audio_slider = ctk.CTkSlider(
+                vol_frame, from_=0, to=100, variable=self.audio_vol_var,
+                orientation="horizontal", command=self._on_audio_vol_change,
+            )
+            audio_slider.pack(fill=tk.X, padx=10, pady=(0, 8))
 
         # Buttons
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X)
+        btn_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        btn_frame.pack(fill=tk.X, padx=12)
 
-        self.connect_btn = ttk.Button(
+        self.connect_btn = ctk.CTkButton(
             btn_frame, text="Disconnect", command=self._toggle_connection,
         )
         self.connect_btn.pack(side=tk.LEFT)
 
-        quit_btn = ttk.Button(btn_frame, text="Quit", command=self._on_quit)
+        quit_btn = ctk.CTkButton(
+            btn_frame, text="Quit", command=self._on_quit,
+            fg_color="#c0392b", hover_color="#e74c3c",
+        )
         quit_btn.pack(side=tk.RIGHT)
 
-        minimize_btn = ttk.Button(
-            btn_frame, text="Minimize to Tray", command=self._minimize_to_tray,
+        minimize_btn = ctk.CTkButton(
+            btn_frame, text="Minimize to Tray",
+            command=self._minimize_to_tray,
+            fg_color="gray40", hover_color="gray50",
         )
         minimize_btn.pack(side=tk.RIGHT, padx=(0, 8))
 
@@ -150,13 +179,13 @@ class SoundBridgeGUI:
             self.status_var.set("Connected")
             self.peer_var.set(f"Peer: {data}")
             self.indicator_var.set("  CONNECTED")
-            self.indicator_label.configure(foreground="green")
+            self.indicator_label.configure(text_color="green")
             self.connect_btn.configure(text="Disconnect")
         elif event == "disconnected":
             self.status_var.set("Searching for peer...")
             self.peer_var.set("Peer: —")
             self.indicator_var.set("  DISCONNECTED")
-            self.indicator_label.configure(foreground="red")
+            self.indicator_label.configure(text_color="red")
             self.connect_btn.configure(text="Reconnect")
 
     def _toggle_connection(self):
