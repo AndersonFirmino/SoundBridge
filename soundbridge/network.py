@@ -1,5 +1,6 @@
 """UDP streaming, discovery, and heartbeat for SoundBridge."""
 
+import logging
 import socket
 import threading
 import time
@@ -9,6 +10,8 @@ import numpy as np
 
 from . import config
 from . import protocol
+
+logger = logging.getLogger(__name__)
 
 
 class UDPSender:

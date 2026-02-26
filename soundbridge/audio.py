@@ -4,6 +4,7 @@ Server (Linux): captures system audio via PulseAudio monitor, receives remote mi
 Client (Windows): plays received audio to headphone, captures mic and sends it.
 """
 
+import logging
 import sys
 import threading
 
@@ -11,6 +12,8 @@ import numpy as np
 import sounddevice as sd
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 class AudioCapture:
@@ -42,7 +45,7 @@ class AudioCapture:
 
     def _sd_callback(self, indata, frames, time_info, status):
         if status:
-            pass  # Could log dropped frames
+            logger.debug("Audio capture status: %s", status)
         self.callback(indata.copy())
 
     def stop(self):
@@ -171,7 +174,7 @@ class VirtualMicSource:
                 f"format=s16le"
             )
         except Exception as e:
-            print(f"[SoundBridge] Failed to create virtual mic source: {e}")
+            logger.error("Failed to create virtual mic source: %s", e)
             self._module_id = None
 
     def write_audio(self, audio_data: np.ndarray):

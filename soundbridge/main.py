@@ -1,6 +1,7 @@
 """Entry point for SoundBridge. Orchestrates server and client modes."""
 
 import argparse
+import logging
 import sys
 import threading
 import time
@@ -11,6 +12,9 @@ from . import config
 from . import protocol
 from .audio import AudioCapture, AudioPlayback, VirtualMicSource, find_pulse_monitor
 from .network import UDPSender, UDPReceiver, Discovery, Heartbeat
+from .state import ConnectionState
+
+logger = logging.getLogger(__name__)
 
 
 class SoundBridgeServer:
@@ -19,7 +23,7 @@ class SoundBridgeServer:
 
     def __init__(self, gui_callback=None):
         self.peer_ip: str | None = None
-        self.connected = False
+        self._state = ConnectionState.DISCONNECTED
         self.gui_callback = gui_callback
 
         # Audio
@@ -36,21 +40,30 @@ class SoundBridgeServer:
         # Volume
         self._mic_volume = 1.0
 
+    @property
+    def connected(self) -> bool:
+        return self._state == ConnectionState.CONNECTED
+
+    @connected.setter
+    def connected(self, value: bool):
+        self._state = ConnectionState.CONNECTED if value else ConnectionState.DISCONNECTED
+
     def start(self):
         """Start the server: discovery + wait for client."""
-        print("[SoundBridge Server] Starting...")
-        print("[SoundBridge Server] Waiting for client on LAN...")
+        logger.info("Starting server...")
+        logger.info("Waiting for client on LAN...")
 
+        self._state = ConnectionState.SEARCHING
         self._discovery = Discovery(on_peer_found=self._on_peer_found)
         self._discovery.start_listen()
 
     def _on_peer_found(self, ip: str):
-        if self.connected:
+        if self._state == ConnectionState.CONNECTED:
             return
 
         self.peer_ip = ip
-        self.connected = True
-        print(f"[SoundBridge Server] Client found: {ip}")
+        self._state = ConnectionState.CONNECTED
+        logger.info("Client found: %s", ip)
 
         self._discovery.stop()
         self._start_streaming()
@@ -70,11 +83,11 @@ class SoundBridgeServer:
         # Capture system audio and send to client
         monitor_device = find_pulse_monitor()
         if monitor_device is None:
-            print("[SoundBridge Server] WARNING: No PulseAudio monitor found. "
-                  "System audio capture unavailable.")
-            print("[SoundBridge Server] Tip: Make sure PulseAudio is running.")
+            logger.warning("No PulseAudio monitor found. "
+                           "System audio capture unavailable.")
+            logger.info("Tip: Make sure PulseAudio is running.")
         else:
-            print(f"[SoundBridge Server] Capturing system audio (device {monitor_device})")
+            logger.info("Capturing system audio (device %s)", monitor_device)
             self._audio_sender = UDPSender(self.peer_ip, config.AUDIO_PORT)
             self._audio_capture = AudioCapture(
                 callback=self._on_audio_captured,
@@ -95,10 +108,10 @@ class SoundBridgeServer:
                 device=sink_idx,
             )
             self._mic_playback.start()
-            print(f"[SoundBridge Server] Virtual mic source created (device {sink_idx})")
+            logger.info("Virtual mic source created (device %s)", sink_idx)
         else:
-            print("[SoundBridge Server] WARNING: Could not find virtual mic sink. "
-                  "Remote mic will not be available as input device.")
+            logger.warning("Could not find virtual mic sink. "
+                           "Remote mic will not be available as input device.")
 
         # Receive mic audio from client
         self._mic_receiver = UDPReceiver(
@@ -106,10 +119,10 @@ class SoundBridgeServer:
             callback=self._on_mic_received,
         )
         self._mic_receiver.start()
-        print("[SoundBridge Server] Streaming active.")
+        logger.info("Streaming active.")
 
     def _on_audio_captured(self, audio_data: np.ndarray):
-        if self._audio_sender and self.connected:
+        if self._audio_sender and self._state == ConnectionState.CONNECTED:
             self._audio_sender.send_audio(
                 audio_data, config.PKT_AUDIO_DATA, config.CHANNELS_STEREO
             )
@@ -122,17 +135,18 @@ class SoundBridgeServer:
             self._mic_playback.feed(audio)
 
     def _on_disconnect(self):
-        if not self.connected:
+        if self._state != ConnectionState.CONNECTED:
             return
-        print("[SoundBridge Server] Client disconnected (heartbeat timeout).")
-        self.connected = False
+        logger.info("Client disconnected (heartbeat timeout).")
+        self._state = ConnectionState.DISCONNECTED
         self.stop_streaming()
 
         if self.gui_callback:
             self.gui_callback("disconnected", None)
 
         # Restart discovery
-        print("[SoundBridge Server] Waiting for client...")
+        logger.info("Waiting for client...")
+        self._state = ConnectionState.SEARCHING
         self._discovery = Discovery(on_peer_found=self._on_peer_found)
         self._discovery.start_listen()
 
@@ -157,7 +171,7 @@ class SoundBridgeServer:
         self._mic_volume = max(0.0, min(1.0, volume))
 
     def stop(self):
-        self.connected = False
+        self._state = ConnectionState.DISCONNECTED
         self.stop_streaming()
         if self._virtual_mic:
             self._virtual_mic.stop()
@@ -165,7 +179,7 @@ class SoundBridgeServer:
         if self._discovery:
             self._discovery.stop()
             self._discovery = None
-        print("[SoundBridge Server] Stopped.")
+        logger.info("Server stopped.")
 
 
 class SoundBridgeClient:
@@ -174,7 +188,7 @@ class SoundBridgeClient:
 
     def __init__(self, server_ip: str | None = None, gui_callback=None):
         self.server_ip = server_ip
-        self.connected = False
+        self._state = ConnectionState.DISCONNECTED
         self.gui_callback = gui_callback
 
         # Audio
@@ -190,25 +204,34 @@ class SoundBridgeClient:
         # Volume
         self._audio_volume = 1.0
 
+    @property
+    def connected(self) -> bool:
+        return self._state == ConnectionState.CONNECTED
+
+    @connected.setter
+    def connected(self, value: bool):
+        self._state = ConnectionState.CONNECTED if value else ConnectionState.DISCONNECTED
+
     def start(self):
         """Start the client: discover server or connect to given IP."""
-        print("[SoundBridge Client] Starting...")
+        logger.info("Starting client...")
 
         if self.server_ip:
-            print(f"[SoundBridge Client] Connecting to {self.server_ip}...")
+            logger.info("Connecting to %s...", self.server_ip)
             self._on_server_found(self.server_ip)
         else:
-            print("[SoundBridge Client] Searching for server on LAN...")
+            logger.info("Searching for server on LAN...")
+            self._state = ConnectionState.SEARCHING
             self._discovery = Discovery(on_peer_found=self._on_server_found)
             self._discovery.start_ping()
 
     def _on_server_found(self, ip: str):
-        if self.connected:
+        if self._state == ConnectionState.CONNECTED:
             return
 
         self.server_ip = ip
-        self.connected = True
-        print(f"[SoundBridge Client] Server found: {ip}")
+        self._state = ConnectionState.CONNECTED
+        logger.info("Server found: %s", ip)
 
         if self._discovery:
             self._discovery.stop()
@@ -239,7 +262,7 @@ class SoundBridgeClient:
             callback=self._on_audio_received,
         )
         self._audio_receiver.start()
-        print("[SoundBridge Client] Receiving system audio → headphone")
+        logger.info("Receiving system audio → headphone")
 
         # Capture mic and send to server
         self._mic_sender = UDPSender(self.server_ip, config.MIC_PORT)
@@ -248,8 +271,8 @@ class SoundBridgeClient:
             channels=config.CHANNELS_MONO,
         )
         self._mic_capture.start()
-        print("[SoundBridge Client] Capturing mic → server")
-        print("[SoundBridge Client] Streaming active.")
+        logger.info("Capturing mic → server")
+        logger.info("Streaming active.")
 
     def _on_audio_received(self, packet: protocol.Packet):
         if packet.pkt_type == config.PKT_AUDIO_DATA and self._audio_playback:
@@ -257,23 +280,24 @@ class SoundBridgeClient:
             self._audio_playback.feed(audio)
 
     def _on_mic_captured(self, audio_data: np.ndarray):
-        if self._mic_sender and self.connected:
+        if self._mic_sender and self._state == ConnectionState.CONNECTED:
             self._mic_sender.send_audio(
                 audio_data, config.PKT_MIC_DATA, config.CHANNELS_MONO
             )
 
     def _on_disconnect(self):
-        if not self.connected:
+        if self._state != ConnectionState.CONNECTED:
             return
-        print("[SoundBridge Client] Server disconnected (heartbeat timeout).")
-        self.connected = False
+        logger.info("Server disconnected (heartbeat timeout).")
+        self._state = ConnectionState.DISCONNECTED
         self.stop_streaming()
 
         if self.gui_callback:
             self.gui_callback("disconnected", None)
 
         # Restart discovery
-        print("[SoundBridge Client] Searching for server...")
+        logger.info("Searching for server...")
+        self._state = ConnectionState.SEARCHING
         self._discovery = Discovery(on_peer_found=self._on_server_found)
         self._discovery.start_ping()
 
@@ -300,12 +324,12 @@ class SoundBridgeClient:
             self._audio_playback.set_volume(self._audio_volume)
 
     def stop(self):
-        self.connected = False
+        self._state = ConnectionState.DISCONNECTED
         self.stop_streaming()
         if self._discovery:
             self._discovery.stop()
             self._discovery = None
-        print("[SoundBridge Client] Stopped.")
+        logger.info("Client stopped.")
 
 
 def run_server_cli(args):
@@ -316,7 +340,7 @@ def run_server_cli(args):
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n[SoundBridge] Shutting down...")
+        logger.info("Shutting down...")
         server.stop()
 
 
@@ -328,7 +352,7 @@ def run_client_cli(args):
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n[SoundBridge] Shutting down...")
+        logger.info("Shutting down...")
         client.stop()
 
 
@@ -367,6 +391,12 @@ def main():
         )
 
     args = parser.parse_args()
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(name)s] %(message)s",
+    )
 
     if args.list_devices:
         from .audio import list_input_devices, list_output_devices
