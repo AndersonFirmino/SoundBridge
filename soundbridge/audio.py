@@ -306,13 +306,16 @@ class PacatPlayback:
 class VirtualMicSource:
     """Creates a virtual PulseAudio source on Linux to pipe remote mic audio.
 
-    Uses pulsectl to load a null-sink module. Audio is written to the sink
-    via PacatPlayback, making its monitor appear as a microphone.
+    Uses pulsectl to load a null-sink module and a remap-source on top of
+    its monitor. The remap-source exposes as Audio/Source so that apps
+    like Discord see it as a real microphone input.
     """
 
     def __init__(self):
-        self._module_id: int | None = None
+        self._sink_module_id: int | None = None
+        self._remap_module_id: int | None = None
         self._sink_name = "soundbridge_virtual_mic"
+        self._source_name = "soundbridge_mic_source"
         self._pulse = None
 
     @property
@@ -321,7 +324,7 @@ class VirtualMicSource:
 
     @property
     def active(self) -> bool:
-        return self._module_id is not None
+        return self._sink_module_id is not None
 
     def start(self):
         if sys.platform != "linux":
@@ -331,33 +334,50 @@ class VirtualMicSource:
             import pulsectl
             self._pulse = pulsectl.Pulse("soundbridge")
 
-            # Remove any leftover null-sink modules from previous runs
+            # Remove any leftover modules from previous runs
             for module in self._pulse.module_list():
-                if module.name == "module-null-sink" and self._sink_name in (module.argument or ""):
-                    try:
-                        self._pulse.module_unload(module.index)
-                    except Exception:
-                        pass
+                arg = module.argument or ""
+                if module.name in ("module-null-sink", "module-remap-source"):
+                    if self._sink_name in arg or self._source_name in arg:
+                        try:
+                            self._pulse.module_unload(module.index)
+                        except Exception:
+                            pass
 
-            # Load a null sink — its monitor becomes our virtual mic
-            self._module_id = self._pulse.module_load(
+            # Load a null sink — audio is written here via pacat
+            self._sink_module_id = self._pulse.module_load(
                 "module-null-sink",
                 f"sink_name={self._sink_name} "
                 f"sink_properties=device.description={config.VIRTUAL_SOURCE_DESC} "
                 f"rate={config.SAMPLE_RATE} channels={config.CHANNELS_MONO} "
                 f"format=s16le"
             )
+
+            # Remap the monitor as a real source so Discord/apps see it as mic
+            self._remap_module_id = self._pulse.module_load(
+                "module-remap-source",
+                f"source_name={self._source_name} "
+                f"master={self._sink_name}.monitor "
+                f"source_properties=device.description={config.VIRTUAL_SOURCE_DESC}"
+            )
         except Exception as e:
             logger.error("Failed to create virtual mic source: %s", e)
-            self._module_id = None
+            self._sink_module_id = None
+            self._remap_module_id = None
 
     def stop(self):
-        if self._pulse and self._module_id is not None:
+        if self._pulse and self._remap_module_id is not None:
             try:
-                self._pulse.module_unload(self._module_id)
+                self._pulse.module_unload(self._remap_module_id)
             except Exception:
                 pass
-            self._module_id = None
+            self._remap_module_id = None
+        if self._pulse and self._sink_module_id is not None:
+            try:
+                self._pulse.module_unload(self._sink_module_id)
+            except Exception:
+                pass
+            self._sink_module_id = None
         if self._pulse:
             self._pulse.close()
             self._pulse = None
