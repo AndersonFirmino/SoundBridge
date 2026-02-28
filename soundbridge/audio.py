@@ -277,6 +277,7 @@ class PacatPlayback:
             f"--channels={self.channels}",
             f"--rate={config.SAMPLE_RATE}",
             f"--device={self.sink_name}",
+            "--latency-msec=10",
         ]
         self._process = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
