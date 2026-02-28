@@ -11,7 +11,7 @@ import numpy as np
 from . import config
 from . import protocol
 from .audio import (
-    AudioCapture, AudioPlayback, PacatPlayback, ParecCapture,
+    AudioCapture, AudioPlayback, ParecCapture,
     VirtualMicSource, find_monitor_source,
 )
 from .network import UDPSender, UDPReceiver, Discovery, Heartbeat
@@ -34,7 +34,6 @@ class SoundBridgeServer:
         self._audio_capture: ParecCapture | None = None
         self._audio_sender: UDPSender | None = None
         self._mic_receiver: UDPReceiver | None = None
-        self._mic_playback: PacatPlayback | None = None
         self._virtual_mic: VirtualMicSource | None = None
 
         # Opus
@@ -123,13 +122,7 @@ class SoundBridgeServer:
             self._audio_capture.start()
 
         if self._virtual_mic.active:
-            self._mic_playback = PacatPlayback(
-                channels=config.CHANNELS_MONO,
-                sink_name=self._virtual_mic.sink_name,
-            )
-            self._mic_playback.start()
-            logger.info("Virtual mic source created (%s)",
-                        self._virtual_mic.sink_name)
+            logger.info("Virtual mic source created (pipe-source)")
         else:
             logger.warning("Could not create virtual mic. "
                            "Remote mic will not be available as input device.")
@@ -152,7 +145,7 @@ class SoundBridgeServer:
             self._audio_seq = (self._audio_seq + 1) % 65536
 
     def _on_mic_received(self, packet: protocol.Packet):
-        if packet.pkt_type != config.PKT_MIC_DATA or not self._mic_playback:
+        if packet.pkt_type != config.PKT_MIC_DATA or not self._virtual_mic:
             return
 
         # Detect gaps and apply PLC
@@ -165,13 +158,13 @@ class SoundBridgeServer:
                     plc_frame = self._mic_decoder.plc(config.FRAME_SIZE)
                     if self._mic_volume != 1.0:
                         plc_frame = (plc_frame.astype(np.float32) * self._mic_volume).astype(np.int16)
-                    self._mic_playback.feed(plc_frame)
+                    self._virtual_mic.feed(plc_frame)
         self._mic_last_seq = packet.seq
 
         pcm = self._mic_decoder.decode(packet.payload)
         if self._mic_volume != 1.0:
             pcm = (pcm.astype(np.float32) * self._mic_volume).astype(np.int16)
-        self._mic_playback.feed(pcm)
+        self._virtual_mic.feed(pcm)
 
     def _on_disconnect(self):
         if self._state != ConnectionState.CONNECTED:
@@ -199,9 +192,6 @@ class SoundBridgeServer:
         if self._mic_receiver:
             self._mic_receiver.stop()
             self._mic_receiver = None
-        if self._mic_playback:
-            self._mic_playback.stop()
-            self._mic_playback = None
         if self._virtual_mic:
             self._virtual_mic.stop()
             self._virtual_mic = None

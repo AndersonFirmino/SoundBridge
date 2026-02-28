@@ -305,80 +305,111 @@ class PacatPlayback:
 
 
 class VirtualMicSource:
-    """Creates a virtual PulseAudio source on Linux to pipe remote mic audio.
+    """Creates a virtual PipeWire/PulseAudio microphone source on Linux.
 
-    Uses pulsectl to load a null-sink module and a remap-source on top of
-    its monitor. The remap-source exposes as Audio/Source so that apps
-    like Discord see it as a real microphone input.
+    Uses module-pipe-source to create a FIFO file. Audio is written
+    directly to the FIFO with zero intermediate nodes — a single
+    PipeWire source node that apps like Discord see as a real mic.
+
+    Latency path: write FIFO → pipe-source → app (1 node, no subprocess).
     """
 
+    FIFO_PATH = "/tmp/soundbridge_mic"
+
     def __init__(self):
-        self._sink_module_id: int | None = None
-        self._remap_module_id: int | None = None
-        self._sink_name = "soundbridge_virtual_mic"
-        self._source_name = "soundbridge_mic_source"
+        self._module_id: int | None = None
+        self._source_name = "soundbridge_mic"
+        self._fifo_fd: int | None = None
         self._pulse = None
 
     @property
-    def sink_name(self) -> str:
-        return self._sink_name
-
-    @property
     def active(self) -> bool:
-        return self._sink_module_id is not None
+        return self._module_id is not None and self._fifo_fd is not None
 
     def start(self):
         if sys.platform != "linux":
             return
 
+        import os
+        import stat
+
+        # Clean up stale FIFO
+        try:
+            if os.path.exists(self.FIFO_PATH):
+                os.unlink(self.FIFO_PATH)
+        except OSError:
+            pass
+
         try:
             import pulsectl
             self._pulse = pulsectl.Pulse("soundbridge")
 
-            # Remove any leftover modules from previous runs
+            # Remove leftover modules from previous runs
             for module in self._pulse.module_list():
                 arg = module.argument or ""
-                if module.name in ("module-null-sink", "module-remap-source"):
-                    if self._sink_name in arg or self._source_name in arg:
-                        try:
-                            self._pulse.module_unload(module.index)
-                        except Exception:
-                            pass
+                if module.name == "module-pipe-source" and self._source_name in arg:
+                    try:
+                        self._pulse.module_unload(module.index)
+                    except Exception:
+                        pass
 
-            # Load a null sink — audio is written here via pacat
-            self._sink_module_id = self._pulse.module_load(
-                "module-null-sink",
-                f"sink_name={self._sink_name} "
-                f"sink_properties=device.description={config.VIRTUAL_SOURCE_DESC} "
-                f"rate={config.SAMPLE_RATE} channels={config.CHANNELS_MONO} "
-                f"format=s16le"
-            )
-
-            # Remap the monitor as a real source so Discord/apps see it as mic
-            self._remap_module_id = self._pulse.module_load(
-                "module-remap-source",
+            # Load pipe-source — creates a FIFO at FIFO_PATH
+            self._module_id = self._pulse.module_load(
+                "module-pipe-source",
                 f"source_name={self._source_name} "
-                f"master={self._sink_name}.monitor "
+                f"file={self.FIFO_PATH} "
+                f"format=s16le "
+                f"rate={config.SAMPLE_RATE} "
+                f"channels={config.CHANNELS_MONO} "
                 f"source_properties=device.description={config.VIRTUAL_SOURCE_DESC}"
             )
+
+            # Open FIFO for writing (non-blocking to avoid hanging if no reader yet)
+            self._fifo_fd = os.open(self.FIFO_PATH, os.O_WRONLY | os.O_NONBLOCK)
+            # Switch back to blocking mode for actual writes
+            import fcntl
+            flags = fcntl.fcntl(self._fifo_fd, fcntl.F_GETFL)
+            fcntl.fcntl(self._fifo_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+
+            logger.info("Virtual mic: pipe-source at %s", self.FIFO_PATH)
+
         except Exception as e:
             logger.error("Failed to create virtual mic source: %s", e)
-            self._sink_module_id = None
-            self._remap_module_id = None
+            self._module_id = None
+            self._fifo_fd = None
+
+    def feed(self, audio_data: np.ndarray):
+        """Write PCM directly to the FIFO — zero-copy to PipeWire."""
+        if self._fifo_fd is not None:
+            import os
+            try:
+                os.write(self._fifo_fd, audio_data.tobytes())
+            except OSError:
+                pass
 
     def stop(self):
-        if self._pulse and self._remap_module_id is not None:
+        import os
+
+        if self._fifo_fd is not None:
             try:
-                self._pulse.module_unload(self._remap_module_id)
+                os.close(self._fifo_fd)
+            except OSError:
+                pass
+            self._fifo_fd = None
+
+        if self._pulse and self._module_id is not None:
+            try:
+                self._pulse.module_unload(self._module_id)
             except Exception:
                 pass
-            self._remap_module_id = None
-        if self._pulse and self._sink_module_id is not None:
-            try:
-                self._pulse.module_unload(self._sink_module_id)
-            except Exception:
-                pass
-            self._sink_module_id = None
+            self._module_id = None
+
         if self._pulse:
             self._pulse.close()
             self._pulse = None
+
+        try:
+            if os.path.exists(self.FIFO_PATH):
+                os.unlink(self.FIFO_PATH)
+        except OSError:
+            pass
