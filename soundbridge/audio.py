@@ -165,6 +165,14 @@ class VirtualMicSource:
             import pulsectl
             self._pulse = pulsectl.Pulse("soundbridge")
 
+            # Remove any leftover null-sink modules from previous runs
+            for module in self._pulse.module_list():
+                if module.name == "module-null-sink" and self._sink_name in (module.argument or ""):
+                    try:
+                        self._pulse.module_unload(module.index)
+                    except Exception:
+                        pass
+
             # Load a null sink — its monitor becomes our virtual mic
             self._module_id = self._pulse.module_load(
                 "module-null-sink",
