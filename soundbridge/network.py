@@ -91,9 +91,12 @@ class Discovery:
         self._zeroconf: Zeroconf | None = None
         self._browser: ServiceBrowser | None = None
         self._service_info: ServiceInfo | None = None
+        self._running = False
+        self._connect_sock: socket.socket | None = None
+        self._listen_thread: threading.Thread | None = None
 
     def start_listen(self):
-        """Register service via mDNS (server mode)."""
+        """Register service via mDNS and wait for client heartbeat (server mode)."""
         local_ip = _get_local_ip()
         logger.info("Discovery: registering mDNS service (ip=%s)", local_ip)
 
@@ -106,7 +109,36 @@ class Discovery:
             properties={"version": "1"},
         )
         self._zeroconf.register_service(self._service_info)
-        logger.info("Discovery: service registered")
+        logger.info("Discovery: service registered, waiting for client heartbeat...")
+
+        # Listen for incoming heartbeats to detect when a client connects
+        self._running = True
+        self._connect_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._connect_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._connect_sock.settimeout(1.0)
+        self._connect_sock.bind(("0.0.0.0", config.HEARTBEAT_PORT))
+        self._listen_thread = threading.Thread(
+            target=self._listen_for_connect, daemon=True
+        )
+        self._listen_thread.start()
+
+    def _listen_for_connect(self):
+        """Wait for the first heartbeat from a client."""
+        while self._running:
+            try:
+                data, addr = self._connect_sock.recvfrom(128)
+                pkt = protocol.decode(data)
+                if pkt and pkt.pkt_type == config.PKT_HEARTBEAT:
+                    logger.info("Discovery: client heartbeat from %s", addr[0])
+                    threading.Thread(
+                        target=self.on_peer_found, args=(addr[0],),
+                        daemon=True,
+                    ).start()
+                    return
+            except socket.timeout:
+                continue
+            except OSError:
+                break
 
     def start_search(self):
         """Browse for mDNS services (client mode)."""
@@ -135,9 +167,16 @@ class Discovery:
         threading.Thread(target=self.on_peer_found, args=(ip,), daemon=True).start()
 
     def stop(self):
+        self._running = False
         if self._browser:
             self._browser.cancel()
             self._browser = None
+        if self._connect_sock:
+            self._connect_sock.close()
+            self._connect_sock = None
+        if self._listen_thread:
+            self._listen_thread.join(timeout=2.0)
+            self._listen_thread = None
         if self._service_info and self._zeroconf:
             self._zeroconf.unregister_service(self._service_info)
             self._service_info = None
