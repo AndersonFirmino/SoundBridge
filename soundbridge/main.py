@@ -11,8 +11,8 @@ import numpy as np
 from . import config
 from . import protocol
 from .audio import (
-    AudioCapture, AudioPlayback, ParecCapture, VirtualMicSource,
-    find_monitor_source,
+    AudioCapture, AudioPlayback, PacatPlayback, ParecCapture,
+    VirtualMicSource, find_monitor_source,
 )
 from .network import UDPSender, UDPReceiver, Discovery, Heartbeat
 from .state import ConnectionState
@@ -33,7 +33,7 @@ class SoundBridgeServer:
         self._audio_capture: ParecCapture | None = None
         self._audio_sender: UDPSender | None = None
         self._mic_receiver: UDPReceiver | None = None
-        self._mic_playback: AudioPlayback | None = None
+        self._mic_playback: PacatPlayback | None = None
         self._virtual_mic: VirtualMicSource | None = None
 
         # Network
@@ -103,17 +103,16 @@ class SoundBridgeServer:
         self._virtual_mic = VirtualMicSource()
         self._virtual_mic.start()
 
-        # Find the null-sink device to write mic audio into
-        sink_idx = self._virtual_mic.get_sink_device_index()
-        if sink_idx is not None:
-            self._mic_playback = AudioPlayback(
+        if self._virtual_mic.active:
+            self._mic_playback = PacatPlayback(
                 channels=config.CHANNELS_MONO,
-                device=sink_idx,
+                sink_name=self._virtual_mic.sink_name,
             )
             self._mic_playback.start()
-            logger.info("Virtual mic source created (device %s)", sink_idx)
+            logger.info("Virtual mic source created (%s)",
+                        self._virtual_mic.sink_name)
         else:
-            logger.warning("Could not find virtual mic sink. "
+            logger.warning("Could not create virtual mic. "
                            "Remote mic will not be available as input device.")
 
         # Receive mic audio from client
@@ -166,6 +165,9 @@ class SoundBridgeServer:
         if self._mic_playback:
             self._mic_playback.stop()
             self._mic_playback = None
+        if self._virtual_mic:
+            self._virtual_mic.stop()
+            self._virtual_mic = None
         if self._heartbeat:
             self._heartbeat.stop()
             self._heartbeat = None
@@ -176,9 +178,6 @@ class SoundBridgeServer:
     def stop(self):
         self._state = ConnectionState.DISCONNECTED
         self.stop_streaming()
-        if self._virtual_mic:
-            self._virtual_mic.stop()
-            self._virtual_mic = None
         if self._discovery:
             self._discovery.stop()
             self._discovery = None

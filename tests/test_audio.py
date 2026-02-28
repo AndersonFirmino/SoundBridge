@@ -12,6 +12,7 @@ from soundbridge.audio import (
     list_input_devices,
     list_output_devices,
     AudioPlayback,
+    PacatPlayback,
     ParecCapture,
 )
 from soundbridge import config
@@ -217,5 +218,63 @@ class TestParecCapture:
         capture._thread.join(timeout=2)
         capture.stop()
 
+        mock_proc.terminate.assert_called_once()
+        mock_proc.wait.assert_called_once()
+
+
+class TestPacatPlayback:
+
+    @patch("soundbridge.audio.subprocess.Popen")
+    def test_feed_writes_bytes_to_stdin(self, mock_popen):
+        """feed() should write audio bytes to pacat stdin."""
+        mock_proc = MagicMock()
+        mock_popen.return_value = mock_proc
+
+        playback = PacatPlayback(
+            channels=config.CHANNELS_MONO,
+            sink_name="soundbridge_virtual_mic",
+        )
+        playback.start()
+
+        frame = np.zeros(config.FRAME_SIZE, dtype=np.int16)
+        playback.feed(frame)
+
+        mock_proc.stdin.write.assert_called_once_with(frame.tobytes())
+        playback.stop()
+
+    @patch("soundbridge.audio.subprocess.Popen")
+    def test_pacat_command_args(self, mock_popen):
+        """Verify pacat is called with correct arguments."""
+        mock_proc = MagicMock()
+        mock_popen.return_value = mock_proc
+
+        playback = PacatPlayback(
+            channels=config.CHANNELS_MONO,
+            sink_name="soundbridge_virtual_mic",
+        )
+        playback.start()
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "pacat"
+        assert "--format=s16le" in cmd
+        assert f"--channels={config.CHANNELS_MONO}" in cmd
+        assert f"--rate={config.SAMPLE_RATE}" in cmd
+        assert "--device=soundbridge_virtual_mic" in cmd
+        playback.stop()
+
+    @patch("soundbridge.audio.subprocess.Popen")
+    def test_stop_terminates_process(self, mock_popen):
+        """stop() should close stdin and terminate the process."""
+        mock_proc = MagicMock()
+        mock_popen.return_value = mock_proc
+
+        playback = PacatPlayback(
+            channels=config.CHANNELS_MONO,
+            sink_name="soundbridge_virtual_mic",
+        )
+        playback.start()
+        playback.stop()
+
+        mock_proc.stdin.close.assert_called_once()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once()

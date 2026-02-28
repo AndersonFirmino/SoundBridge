@@ -211,17 +211,68 @@ def list_output_devices() -> list[dict]:
     return result
 
 
+class PacatPlayback:
+    """Plays audio into a PulseAudio/PipeWire sink using pacat."""
+
+    def __init__(self, channels: int = config.CHANNELS_MONO,
+                 sink_name: str = ""):
+        self.channels = channels
+        self.sink_name = sink_name
+        self._process: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+
+    def start(self):
+        cmd = [
+            "pacat",
+            "--format=s16le",
+            f"--channels={self.channels}",
+            f"--rate={config.SAMPLE_RATE}",
+            f"--device={self.sink_name}",
+        ]
+        self._process = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+    def feed(self, audio_data: np.ndarray):
+        """Write audio data to the sink."""
+        with self._lock:
+            if self._process and self._process.stdin:
+                try:
+                    self._process.stdin.write(audio_data.tobytes())
+                except (BrokenPipeError, OSError):
+                    pass
+
+    def stop(self):
+        if self._process:
+            if self._process.stdin:
+                try:
+                    self._process.stdin.close()
+                except OSError:
+                    pass
+            self._process.terminate()
+            self._process.wait()
+            self._process = None
+
+
 class VirtualMicSource:
     """Creates a virtual PulseAudio source on Linux to pipe remote mic audio.
 
-    Uses pulsectl to load a null-sink module and writes audio to it,
-    making it appear as a microphone in applications like Google Meet.
+    Uses pulsectl to load a null-sink module. Audio is written to the sink
+    via PacatPlayback, making its monitor appear as a microphone.
     """
 
     def __init__(self):
         self._module_id: int | None = None
         self._sink_name = "soundbridge_virtual_mic"
         self._pulse = None
+
+    @property
+    def sink_name(self) -> str:
+        return self._sink_name
+
+    @property
+    def active(self) -> bool:
+        return self._module_id is not None
 
     def start(self):
         if sys.platform != "linux":
@@ -250,27 +301,6 @@ class VirtualMicSource:
         except Exception as e:
             logger.error("Failed to create virtual mic source: %s", e)
             self._module_id = None
-
-    def write_audio(self, audio_data: np.ndarray):
-        """Write mic audio to the virtual source.
-
-        This feeds audio into the null-sink so its monitor appears as a mic.
-        Since PulseAudio null-sink doesn't have a direct write API,
-        we use sounddevice to output to the sink.
-        """
-        # Audio is written via a separate AudioPlayback targeting the null-sink
-        pass
-
-    def get_sink_device_index(self) -> int | None:
-        """Get the sounddevice output device index for the null-sink."""
-        try:
-            devices = sd.query_devices()
-            for i, dev in enumerate(devices):
-                if self._sink_name in dev["name"] and dev["max_output_channels"] > 0:
-                    return i
-        except Exception:
-            pass
-        return None
 
     def stop(self):
         if self._pulse and self._module_id is not None:
