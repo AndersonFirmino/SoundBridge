@@ -364,12 +364,19 @@ class VirtualMicSource:
                 f"source_properties=device.description={config.VIRTUAL_SOURCE_DESC}"
             )
 
-            # Open FIFO for writing (non-blocking to avoid hanging if no reader yet)
+            # Open FIFO for writing in non-blocking mode
             self._fifo_fd = os.open(self.FIFO_PATH, os.O_WRONLY | os.O_NONBLOCK)
-            # Switch back to blocking mode for actual writes
+
+            # Shrink kernel pipe buffer to minimize latency.
+            # Default is 64KB (~666ms of mono int16). We set to 4096
+            # bytes (~42ms) — enough for a few frames, small enough
+            # to prevent delay accumulation.
             import fcntl
-            flags = fcntl.fcntl(self._fifo_fd, fcntl.F_GETFL)
-            fcntl.fcntl(self._fifo_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+            F_SETPIPE_SZ = 1031
+            try:
+                fcntl.fcntl(self._fifo_fd, F_SETPIPE_SZ, 4096)
+            except OSError:
+                pass  # non-critical, works with default too
 
             logger.info("Virtual mic: pipe-source at %s", self.FIFO_PATH)
 
@@ -379,11 +386,14 @@ class VirtualMicSource:
             self._fifo_fd = None
 
     def feed(self, audio_data: np.ndarray):
-        """Write PCM directly to the FIFO — zero-copy to PipeWire."""
+        """Write PCM directly to the FIFO. Drops frames if pipe is full
+        to prevent latency accumulation (better to drop than delay)."""
         if self._fifo_fd is not None:
             import os
             try:
                 os.write(self._fifo_fd, audio_data.tobytes())
+            except BlockingIOError:
+                pass  # pipe full — drop frame to keep latency low
             except OSError:
                 pass
 
