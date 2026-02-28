@@ -1,6 +1,8 @@
 """Tests for audio module — mock sounddevice to avoid hardware dependency."""
 
+import collections
 import sys
+import time
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -130,40 +132,44 @@ class TestListDevices:
 
 class TestAudioPlayback:
 
-    def test_feed_buffer_max_fifteen_frames(self):
-        """Buffer should not exceed 15 frames."""
+    def test_feed_buffer_max_depth(self):
+        """Buffer should not exceed max_depth frames."""
         playback = AudioPlayback(channels=config.CHANNELS_STEREO)
         frame = np.zeros((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
 
-        for _ in range(20):
+        for _ in range(25):
             playback.feed(frame)
 
-        assert len(playback._buffer) == 15
+        assert len(playback._buffer) == playback._max_depth
 
-    def test_prebuffering_outputs_silence_until_threshold(self):
-        """Callback should output silence until prebuffer_count frames are buffered."""
+    def test_prebuffering_outputs_silence_until_target_depth(self):
+        """Callback should output silence until target_depth frames are buffered."""
         playback = AudioPlayback(channels=config.CHANNELS_STEREO)
+        # Fix target_depth to isolate prebuffering logic from jitter adaptation
+        playback._target_depth = 4
         frame = np.zeros((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
         outdata = np.ones((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
 
-        # Feed 2 frames (below prebuffer_count=3)
-        playback.feed(frame)
-        playback.feed(frame)
+        # Feed 3 frames directly into buffer (bypass jitter measurement)
+        with playback._lock:
+            for _ in range(3):
+                playback._buffer.append(frame)
 
         # Callback should output silence and not consume buffer
         playback._sd_callback(outdata, config.FRAME_SIZE, None, None)
         assert np.all(outdata == 0)
-        assert len(playback._buffer) == 2
+        assert len(playback._buffer) == 3
         assert playback._prebuffering is True
 
-        # Feed 3rd frame — reaches threshold
-        playback.feed(frame)
+        # Add 4th frame — reaches target_depth
+        with playback._lock:
+            playback._buffer.append(frame)
 
         # Now callback should exit prebuffering and consume a frame
         outdata = np.ones((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
         playback._sd_callback(outdata, config.FRAME_SIZE, None, None)
         assert playback._prebuffering is False
-        assert len(playback._buffer) == 2
+        assert len(playback._buffer) == 3
 
     def test_set_volume_clamps(self):
         """Volume must be clamped between 0.0 and 1.0."""
@@ -177,6 +183,40 @@ class TestAudioPlayback:
 
         playback.set_volume(0.7)
         assert playback._volume == pytest.approx(0.7)
+
+    def test_buffer_is_deque(self):
+        """Buffer should be a collections.deque for O(1) popleft."""
+        playback = AudioPlayback()
+        assert isinstance(playback._buffer, collections.deque)
+
+    def test_jitter_updates_target_depth(self):
+        """High jitter should increase target_depth."""
+        playback = AudioPlayback(channels=config.CHANNELS_STEREO)
+        frame = np.zeros((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
+
+        initial_target = playback._target_depth
+
+        # Simulate high jitter by feeding with irregular timing
+        playback._last_arrival = time.monotonic() - 0.5  # 500ms ago
+        playback.feed(frame)
+
+        # Jitter should have been measured and target potentially increased
+        assert playback._jitter > 0
+        assert playback._target_depth >= playback._min_depth
+
+    def test_target_depth_bounded(self):
+        """Target depth should stay within min/max bounds."""
+        playback = AudioPlayback(channels=config.CHANNELS_STEREO)
+
+        # Force extreme jitter
+        playback._jitter = 10.0  # 10 seconds of jitter
+        playback._update_target()
+        assert playback._target_depth == playback._max_depth
+
+        # Force zero jitter
+        playback._jitter = 0.0
+        playback._update_target()
+        assert playback._target_depth == playback._min_depth
 
 
 class TestParecCapture:

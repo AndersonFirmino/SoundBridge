@@ -15,7 +15,7 @@ HEARTBEAT_PORT = 4413
 
 # Protocol
 MAGIC = b"\x53\x42"  # "SB"
-HEADER_SIZE = 8  # magic(2) + type(1) + channels(1) + sample_rate(2) + payload_size(2)
+HEADER_SIZE = 10  # magic(2) + type(1) + channels(1) + sample_rate(2) + seq(2) + payload_size(2)
 
 # Packet types
 PKT_AUDIO_DATA = 0x01

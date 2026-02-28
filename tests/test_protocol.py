@@ -6,35 +6,35 @@ import numpy as np
 import pytest
 
 from soundbridge import config
-from soundbridge.protocol import Packet, encode, decode, payload_to_audio
+from soundbridge.protocol import Packet, encode, decode
 
 
 class TestEncodeDecodeRoundTrip:
 
-    def test_stereo_round_trip(self, stereo_frame):
-        """Encode stereo audio and decode back — data must survive."""
-        raw = encode(config.PKT_AUDIO_DATA, stereo_frame, config.CHANNELS_STEREO)
+    def test_stereo_round_trip(self, stereo_payload):
+        """Encode stereo payload and decode back — data must survive."""
+        raw = encode(config.PKT_AUDIO_DATA, stereo_payload,
+                     config.CHANNELS_STEREO, seq=42)
         packet = decode(raw)
 
         assert packet is not None
         assert packet.pkt_type == config.PKT_AUDIO_DATA
         assert packet.channels == config.CHANNELS_STEREO
         assert packet.sample_rate == config.SAMPLE_RATE
+        assert packet.seq == 42
+        assert packet.payload == stereo_payload
 
-        recovered = payload_to_audio(packet)
-        np.testing.assert_array_equal(recovered, stereo_frame)
-
-    def test_mono_round_trip(self, mono_frame):
-        """Encode mono audio and decode back — data must survive."""
-        raw = encode(config.PKT_MIC_DATA, mono_frame, config.CHANNELS_MONO)
+    def test_mono_round_trip(self, mono_payload):
+        """Encode mono payload and decode back — data must survive."""
+        raw = encode(config.PKT_MIC_DATA, mono_payload,
+                     config.CHANNELS_MONO, seq=100)
         packet = decode(raw)
 
         assert packet is not None
         assert packet.pkt_type == config.PKT_MIC_DATA
         assert packet.channels == config.CHANNELS_MONO
-
-        recovered = payload_to_audio(packet)
-        np.testing.assert_array_equal(recovered, mono_frame)
+        assert packet.seq == 100
+        assert packet.payload == mono_payload
 
     def test_heartbeat_no_payload(self):
         """Heartbeat packets have no audio payload."""
@@ -43,8 +43,48 @@ class TestEncodeDecodeRoundTrip:
 
         assert packet is not None
         assert packet.pkt_type == config.PKT_HEARTBEAT
+        assert packet.seq == 0
         assert packet.payload == b""
 
+    def test_seq_wraps_at_65535(self):
+        """Sequence number uses full uint16 range."""
+        raw = encode(config.PKT_AUDIO_DATA, b"\x00\x01", seq=65535)
+        packet = decode(raw)
+        assert packet is not None
+        assert packet.seq == 65535
+
+    def test_seq_default_zero(self):
+        """Default seq is 0."""
+        raw = encode(config.PKT_AUDIO_DATA, b"test")
+        packet = decode(raw)
+        assert packet is not None
+        assert packet.seq == 0
+
+
+class TestHeaderFormat:
+
+    def test_header_size_is_10(self):
+        """Header must be 10 bytes."""
+        assert config.HEADER_SIZE == 10
+
+    def test_struct_format(self):
+        """Struct format !2sBBHHH produces 10 bytes."""
+        size = struct.calcsize("!2sBBHHH")
+        assert size == config.HEADER_SIZE
+
+    def test_header_fields_order(self):
+        """Verify header field order: magic, type, channels, sample_rate, seq, payload_size."""
+        raw = encode(config.PKT_AUDIO_DATA, b"\xAA\xBB",
+                     channels=2, sample_rate=48000, seq=1234)
+        magic, pkt_type, channels, sr, seq, ps = struct.unpack(
+            "!2sBBHHH", raw[:10]
+        )
+        assert magic == config.MAGIC
+        assert pkt_type == config.PKT_AUDIO_DATA
+        assert channels == 2
+        assert sr == 48000
+        assert seq == 1234
+        assert ps == 2
 
 
 class TestDecodeRejection:
@@ -62,34 +102,14 @@ class TestDecodeRejection:
 
     def test_inconsistent_payload_size(self):
         """Packet declaring more payload than available bytes must be rejected."""
-        # Build a valid header that claims 100 bytes of payload, but only attach 10
         header = struct.pack(
-            "!2sBBHH",
+            "!2sBBHHH",
             config.MAGIC,
             config.PKT_AUDIO_DATA,
             config.CHANNELS_STEREO,
             config.SAMPLE_RATE,
-            100,
+            0,   # seq
+            100,  # payload_size
         )
         raw = header + b"\x00" * 10
         assert decode(raw) is None
-
-
-class TestPayloadToAudio:
-
-    def test_stereo_reshape(self, stereo_frame):
-        """Stereo payload must be reshaped to (N, 2)."""
-        raw = encode(config.PKT_AUDIO_DATA, stereo_frame, config.CHANNELS_STEREO)
-        packet = decode(raw)
-        audio = payload_to_audio(packet)
-
-        assert audio.ndim == 2
-        assert audio.shape[1] == config.CHANNELS_STEREO
-
-    def test_mono_no_reshape(self, mono_frame):
-        """Mono payload stays 1D."""
-        raw = encode(config.PKT_MIC_DATA, mono_frame, config.CHANNELS_MONO)
-        packet = decode(raw)
-        audio = payload_to_audio(packet)
-
-        assert audio.ndim == 1

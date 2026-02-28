@@ -6,7 +6,6 @@ import threading
 import time
 from typing import Callable
 
-import numpy as np
 from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceStateChange, Zeroconf
 
 from . import config
@@ -23,10 +22,10 @@ class UDPSender:
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def send_audio(self, audio_data: np.ndarray, pkt_type: int,
-                   channels: int = config.CHANNELS_STEREO):
-        """Send an audio frame as a UDP packet."""
-        packet = protocol.encode(pkt_type, audio_data, channels)
+    def send_audio(self, payload: bytes, pkt_type: int,
+                   channels: int = config.CHANNELS_STEREO, seq: int = 0):
+        """Send an encoded audio payload as a UDP packet."""
+        packet = protocol.encode(pkt_type, payload, channels, seq=seq)
         self.sock.sendto(packet, (self.target_ip, self.port))
 
     def close(self):
@@ -52,7 +51,7 @@ class UDPReceiver:
         self._thread.start()
 
     def _receive_loop(self):
-        buf_size = config.HEADER_SIZE + (config.FRAME_SIZE * config.CHANNELS_STEREO * config.BYTES_PER_SAMPLE) + 64
+        buf_size = config.HEADER_SIZE + 1024  # Opus max ~1275 bytes
         while self._running:
             try:
                 data, addr = self.sock.recvfrom(buf_size)

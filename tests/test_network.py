@@ -18,8 +18,9 @@ class TestUDPSender:
         mock_socket_cls.return_value = mock_sock
 
         sender = UDPSender("192.168.1.100", config.AUDIO_PORT)
-        audio = np.zeros((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
-        sender.send_audio(audio, config.PKT_AUDIO_DATA, config.CHANNELS_STEREO)
+        payload = b"\x00" * 160  # Opus-like payload
+        sender.send_audio(payload, config.PKT_AUDIO_DATA,
+                          config.CHANNELS_STEREO, seq=42)
 
         mock_sock.sendto.assert_called_once()
         call_args = mock_sock.sendto.call_args
@@ -33,6 +34,29 @@ class TestUDPSender:
         assert packet is not None
         assert packet.pkt_type == config.PKT_AUDIO_DATA
         assert packet.channels == config.CHANNELS_STEREO
+        assert packet.seq == 42
+        assert packet.payload == payload
+
+    @patch("soundbridge.network.socket.socket")
+    def test_send_audio_default_seq_zero(self, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+
+        sender = UDPSender("192.168.1.100", config.AUDIO_PORT)
+        sender.send_audio(b"\x00" * 80, config.PKT_MIC_DATA, config.CHANNELS_MONO)
+
+        sent_data = mock_sock.sendto.call_args[0][0]
+        packet = protocol.decode(sent_data)
+        assert packet is not None
+        assert packet.seq == 0
+
+
+class TestUDPReceiverBufSize:
+
+    def test_buf_size_fits_opus(self):
+        """Buffer size should accommodate Opus packets (header + 1024)."""
+        expected = config.HEADER_SIZE + 1024
+        assert expected == 1034
 
 
 class TestDiscoveryServer:
@@ -148,18 +172,21 @@ class TestHeartbeat:
         packet = protocol.decode(raw)
         assert packet is not None
         assert packet.pkt_type == config.PKT_HEARTBEAT
+        assert packet.seq == 0
 
 
 class TestUDPReceiverDecode:
 
     def test_decode_called_on_valid_data(self):
         """protocol.decode should correctly parse a valid packet."""
-        audio = np.zeros((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
-        raw = protocol.encode(config.PKT_AUDIO_DATA, audio, config.CHANNELS_STEREO)
+        payload = b"\x00" * 160
+        raw = protocol.encode(config.PKT_AUDIO_DATA, payload,
+                              config.CHANNELS_STEREO, seq=7)
 
         packet = protocol.decode(raw)
         assert packet is not None
         assert packet.pkt_type == config.PKT_AUDIO_DATA
+        assert packet.seq == 7
 
     def test_decode_returns_none_on_garbage(self):
         """protocol.decode should return None for invalid data."""

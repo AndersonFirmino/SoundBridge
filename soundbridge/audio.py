@@ -4,10 +4,12 @@ Server (Linux): captures system audio via PulseAudio monitor, receives remote mi
 Client (Windows): plays received audio to headphone, captures mic and sends it.
 """
 
+import collections
 import logging
 import subprocess
 import sys
 import threading
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -57,16 +59,25 @@ class AudioCapture:
 
 
 class AudioPlayback:
-    """Plays audio frames received from the network."""
+    """Plays audio frames received from the network with adaptive jitter buffer."""
 
     def __init__(self, channels: int = config.CHANNELS_STEREO, device=None):
         self.channels = channels
         self.device = device
         self._stream: sd.OutputStream | None = None
-        self._buffer: list[np.ndarray] = []
+        self._buffer: collections.deque = collections.deque()
         self._lock = threading.Lock()
         self._volume = 1.0
-        self._prebuffer_count = 3
+
+        # Adaptive jitter buffer
+        self._min_depth = 2      # frames
+        self._max_depth = 20     # frames
+        self._target_depth = 4   # frames (40ms initial at 10ms/frame)
+
+        # RFC 3550 jitter estimation
+        self._last_arrival = 0.0
+        self._jitter = 0.0
+        self._frame_duration = config.FRAME_SIZE / config.SAMPLE_RATE
         self._prebuffering = True
 
     def start(self):
@@ -81,16 +92,24 @@ class AudioPlayback:
         )
         self._stream.start()
 
+    def _update_target(self):
+        """Update target buffer depth based on measured jitter."""
+        jitter_frames = self._jitter / self._frame_duration
+        self._target_depth = max(
+            self._min_depth,
+            min(self._max_depth, int(jitter_frames) + 2),
+        )
+
     def _sd_callback(self, outdata, frames, time_info, status):
         with self._lock:
             if self._prebuffering:
-                if len(self._buffer) >= self._prebuffer_count:
+                if len(self._buffer) >= self._target_depth:
                     self._prebuffering = False
                 else:
                     outdata[:] = np.zeros((frames, self.channels), dtype=np.int16)
                     return
             if self._buffer:
-                chunk = self._buffer.pop(0)
+                chunk = self._buffer.popleft()
                 if self._volume != 1.0:
                     chunk = (chunk.astype(np.float32) * self._volume).astype(np.int16)
                 if chunk.shape[0] < frames:
@@ -103,9 +122,17 @@ class AudioPlayback:
                 outdata[:] = np.zeros((frames, self.channels), dtype=np.int16)
 
     def feed(self, audio_data: np.ndarray):
-        """Feed audio data into the playback buffer."""
+        """Feed audio data into the playback buffer with jitter measurement."""
+        now = time.monotonic()
+        if self._last_arrival > 0:
+            # RFC 3550 jitter estimation
+            delta = abs((now - self._last_arrival) - self._frame_duration)
+            self._jitter += (delta - self._jitter) / 16.0
+            self._update_target()
+        self._last_arrival = now
+
         with self._lock:
-            if len(self._buffer) < 15:
+            if len(self._buffer) < self._max_depth:
                 self._buffer.append(audio_data)
 
     def set_volume(self, volume: float):

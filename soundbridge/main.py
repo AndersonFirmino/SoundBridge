@@ -15,14 +15,15 @@ from .audio import (
     VirtualMicSource, find_monitor_source,
 )
 from .network import UDPSender, UDPReceiver, Discovery, Heartbeat
+from .opus import OpusEncoder, OpusDecoder
 from .state import ConnectionState
 
 logger = logging.getLogger(__name__)
 
 
 class SoundBridgeServer:
-    """Server mode (Linux): captures system audio → sends to client.
-    Receives mic from client → virtual PulseAudio source."""
+    """Server mode (Linux): captures system audio -> sends to client.
+    Receives mic from client -> virtual PulseAudio source."""
 
     def __init__(self, gui_callback=None):
         self.peer_ip: str | None = None
@@ -35,6 +36,12 @@ class SoundBridgeServer:
         self._mic_receiver: UDPReceiver | None = None
         self._mic_playback: PacatPlayback | None = None
         self._virtual_mic: VirtualMicSource | None = None
+
+        # Opus
+        self._audio_encoder: OpusEncoder | None = None
+        self._mic_decoder: OpusDecoder | None = None
+        self._audio_seq = 0
+        self._mic_last_seq: int | None = None
 
         # Network
         self._discovery: Discovery | None = None
@@ -83,6 +90,16 @@ class SoundBridgeServer:
         self._heartbeat.start_sender()
         self._heartbeat.start_monitor()
 
+        # Setup Opus encoder/decoder
+        self._audio_encoder = OpusEncoder(
+            config.SAMPLE_RATE, config.CHANNELS_STEREO, bitrate=128000,
+        )
+        self._mic_decoder = OpusDecoder(
+            config.SAMPLE_RATE, config.CHANNELS_MONO,
+        )
+        self._audio_seq = 0
+        self._mic_last_seq = None
+
         # Find monitor BEFORE creating null-sink (PipeWire changes default sink)
         monitor_source = find_monitor_source()
 
@@ -123,20 +140,38 @@ class SoundBridgeServer:
             callback=self._on_mic_received,
         )
         self._mic_receiver.start()
-        logger.info("Streaming active.")
+        logger.info("Streaming active (Opus codec enabled).")
 
     def _on_audio_captured(self, audio_data: np.ndarray):
         if self._audio_sender and self._state == ConnectionState.CONNECTED:
+            opus_data = self._audio_encoder.encode(audio_data)
             self._audio_sender.send_audio(
-                audio_data, config.PKT_AUDIO_DATA, config.CHANNELS_STEREO
+                opus_data, config.PKT_AUDIO_DATA,
+                config.CHANNELS_STEREO, seq=self._audio_seq,
             )
+            self._audio_seq = (self._audio_seq + 1) % 65536
 
     def _on_mic_received(self, packet: protocol.Packet):
-        if packet.pkt_type == config.PKT_MIC_DATA and self._mic_playback:
-            audio = protocol.payload_to_audio(packet)
-            if self._mic_volume != 1.0:
-                audio = (audio.astype(np.float32) * self._mic_volume).astype(np.int16)
-            self._mic_playback.feed(audio)
+        if packet.pkt_type != config.PKT_MIC_DATA or not self._mic_playback:
+            return
+
+        # Detect gaps and apply PLC
+        if self._mic_last_seq is not None:
+            expected = (self._mic_last_seq + 1) % 65536
+            gap = (packet.seq - expected) % 65536
+            if 0 < gap < 100:
+                logger.debug("PLC: mic gap of %d packets", gap)
+                for _ in range(gap):
+                    plc_frame = self._mic_decoder.plc(config.FRAME_SIZE)
+                    if self._mic_volume != 1.0:
+                        plc_frame = (plc_frame.astype(np.float32) * self._mic_volume).astype(np.int16)
+                    self._mic_playback.feed(plc_frame)
+        self._mic_last_seq = packet.seq
+
+        pcm = self._mic_decoder.decode(packet.payload)
+        if self._mic_volume != 1.0:
+            pcm = (pcm.astype(np.float32) * self._mic_volume).astype(np.int16)
+        self._mic_playback.feed(pcm)
 
     def _on_disconnect(self):
         if self._state != ConnectionState.CONNECTED:
@@ -173,6 +208,12 @@ class SoundBridgeServer:
         if self._heartbeat:
             self._heartbeat.stop()
             self._heartbeat = None
+        if self._audio_encoder:
+            self._audio_encoder.destroy()
+            self._audio_encoder = None
+        if self._mic_decoder:
+            self._mic_decoder.destroy()
+            self._mic_decoder = None
 
     def set_mic_volume(self, volume: float):
         self._mic_volume = max(0.0, min(1.0, volume))
@@ -187,8 +228,8 @@ class SoundBridgeServer:
 
 
 class SoundBridgeClient:
-    """Client mode (Windows): receives system audio → plays on headphone.
-    Captures mic → sends to server."""
+    """Client mode (Windows): receives system audio -> plays on headphone.
+    Captures mic -> sends to server."""
 
     def __init__(self, server_ip: str | None = None, gui_callback=None):
         self.server_ip = server_ip
@@ -200,6 +241,12 @@ class SoundBridgeClient:
         self._audio_playback: AudioPlayback | None = None
         self._mic_capture: AudioCapture | None = None
         self._mic_sender: UDPSender | None = None
+
+        # Opus
+        self._audio_decoder: OpusDecoder | None = None
+        self._mic_encoder: OpusEncoder | None = None
+        self._mic_seq = 0
+        self._audio_last_seq: int | None = None
 
         # Network
         self._discovery: Discovery | None = None
@@ -255,6 +302,16 @@ class SoundBridgeClient:
         self._heartbeat.start_sender()
         self._heartbeat.start_monitor()
 
+        # Setup Opus decoder/encoder
+        self._audio_decoder = OpusDecoder(
+            config.SAMPLE_RATE, config.CHANNELS_STEREO,
+        )
+        self._mic_encoder = OpusEncoder(
+            config.SAMPLE_RATE, config.CHANNELS_MONO, bitrate=64000,
+        )
+        self._mic_seq = 0
+        self._audio_last_seq = None
+
         # Receive system audio from server and play it
         self._audio_playback = AudioPlayback(
             channels=config.CHANNELS_STEREO,
@@ -266,7 +323,7 @@ class SoundBridgeClient:
             callback=self._on_audio_received,
         )
         self._audio_receiver.start()
-        logger.info("Receiving system audio → headphone")
+        logger.info("Receiving system audio -> headphone (Opus)")
 
         # Capture mic and send to server
         self._mic_sender = UDPSender(self.server_ip, config.MIC_PORT)
@@ -275,19 +332,35 @@ class SoundBridgeClient:
             channels=config.CHANNELS_MONO,
         )
         self._mic_capture.start()
-        logger.info("Capturing mic → server")
-        logger.info("Streaming active.")
+        logger.info("Capturing mic -> server (Opus)")
+        logger.info("Streaming active (Opus codec enabled).")
 
     def _on_audio_received(self, packet: protocol.Packet):
-        if packet.pkt_type == config.PKT_AUDIO_DATA and self._audio_playback:
-            audio = protocol.payload_to_audio(packet)
-            self._audio_playback.feed(audio)
+        if packet.pkt_type != config.PKT_AUDIO_DATA or not self._audio_playback:
+            return
+
+        # Detect gaps and apply PLC
+        if self._audio_last_seq is not None:
+            expected = (self._audio_last_seq + 1) % 65536
+            gap = (packet.seq - expected) % 65536
+            if 0 < gap < 100:
+                logger.debug("PLC: audio gap of %d packets", gap)
+                for _ in range(gap):
+                    plc_frame = self._audio_decoder.plc(config.FRAME_SIZE)
+                    self._audio_playback.feed(plc_frame)
+        self._audio_last_seq = packet.seq
+
+        pcm = self._audio_decoder.decode(packet.payload)
+        self._audio_playback.feed(pcm)
 
     def _on_mic_captured(self, audio_data: np.ndarray):
         if self._mic_sender and self._state == ConnectionState.CONNECTED:
+            opus_data = self._mic_encoder.encode(audio_data)
             self._mic_sender.send_audio(
-                audio_data, config.PKT_MIC_DATA, config.CHANNELS_MONO
+                opus_data, config.PKT_MIC_DATA,
+                config.CHANNELS_MONO, seq=self._mic_seq,
             )
+            self._mic_seq = (self._mic_seq + 1) % 65536
 
     def _on_disconnect(self):
         if self._state != ConnectionState.CONNECTED:
@@ -321,6 +394,12 @@ class SoundBridgeClient:
         if self._heartbeat:
             self._heartbeat.stop()
             self._heartbeat = None
+        if self._audio_decoder:
+            self._audio_decoder.destroy()
+            self._audio_decoder = None
+        if self._mic_encoder:
+            self._mic_encoder.destroy()
+            self._mic_encoder = None
 
     def set_audio_volume(self, volume: float):
         self._audio_volume = max(0.0, min(1.0, volume))
