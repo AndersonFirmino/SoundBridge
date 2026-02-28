@@ -45,21 +45,6 @@ class TestEncodeDecodeRoundTrip:
         assert packet.pkt_type == config.PKT_HEARTBEAT
         assert packet.payload == b""
 
-    def test_discovery_ping(self):
-        raw = encode(config.PKT_DISCOVERY_PING, channels=0, sample_rate=0)
-        packet = decode(raw)
-
-        assert packet is not None
-        assert packet.pkt_type == config.PKT_DISCOVERY_PING
-        assert packet.payload == b""
-
-    def test_discovery_pong(self):
-        raw = encode(config.PKT_DISCOVERY_PONG, channels=0, sample_rate=0)
-        packet = decode(raw)
-
-        assert packet is not None
-        assert packet.pkt_type == config.PKT_DISCOVERY_PONG
-        assert packet.payload == b""
 
 
 class TestDecodeRejection:

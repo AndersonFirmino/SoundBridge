@@ -10,6 +10,7 @@ dependencies = [
     "pystray>=0.19.5",
     "pillow>=10.0.0",
     "pulsectl>=23.5.0; sys_platform == 'linux'",
+    "zeroconf>=0.131.0",
 ]
 
 [project.scripts]

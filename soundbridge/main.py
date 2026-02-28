@@ -223,7 +223,7 @@ class SoundBridgeClient:
             logger.info("Searching for server on LAN...")
             self._state = ConnectionState.SEARCHING
             self._discovery = Discovery(on_peer_found=self._on_server_found)
-            self._discovery.start_ping()
+            self._discovery.start_search()
 
     def _on_server_found(self, ip: str):
         if self._state == ConnectionState.CONNECTED:
@@ -299,7 +299,7 @@ class SoundBridgeClient:
         logger.info("Searching for server...")
         self._state = ConnectionState.SEARCHING
         self._discovery = Discovery(on_peer_found=self._on_server_found)
-        self._discovery.start_ping()
+        self._discovery.start_search()
 
     def stop_streaming(self):
         if self._audio_receiver:

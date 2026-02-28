@@ -2,108 +2,17 @@
 
 import logging
 import socket
-import struct
-import sys
 import threading
 import time
 from typing import Callable
 
 import numpy as np
+from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceStateChange, Zeroconf
 
 from . import config
 from . import protocol
 
 logger = logging.getLogger(__name__)
-
-
-def _get_broadcast_addresses() -> list[str]:
-    """Detect broadcast addresses for all active network interfaces.
-
-    Uses OS-specific methods: netifaces/fcntl on Linux, ipconfig parsing
-    on Windows.  Falls back to 255.255.255.255 if detection fails.
-    """
-    addrs: list[str] = []
-
-    if sys.platform == "linux":
-        try:
-            import fcntl
-            import array
-
-            # SIOCGIFCONF — get list of interfaces
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Ask for up to 4096 bytes of interface data
-            buf = array.array("B", b"\0" * 4096)
-            result = fcntl.ioctl(
-                sock.fileno(),
-                0x8912,  # SIOCGIFCONF
-                struct.pack("iL", 4096, buf.buffer_info()[0]),
-            )
-            out_bytes = struct.unpack("iL", result)[0]
-            data = buf.tobytes()[:out_bytes]
-
-            offset = 0
-            while offset < len(data):
-                iface_name = data[offset : offset + 16].split(b"\0", 1)[0]
-                offset += 16 + 16  # skip name + sockaddr
-
-                if not iface_name or iface_name == b"lo":
-                    continue
-
-                try:
-                    # SIOCGIFBRDADDR — get broadcast address
-                    req = struct.pack("256s", iface_name)
-                    res = fcntl.ioctl(sock.fileno(), 0x8919, req)
-                    bcast_ip = socket.inet_ntoa(res[20:24])
-                    if bcast_ip and bcast_ip != "0.0.0.0":
-                        addrs.append(bcast_ip)
-                except OSError:
-                    continue
-
-            sock.close()
-        except Exception:
-            pass
-
-    elif sys.platform == "win32":
-        try:
-            import subprocess
-            output = subprocess.check_output(
-                ["powershell", "-Command",
-                 "Get-NetIPAddress -AddressFamily IPv4 | "
-                 "Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | "
-                 "Select-Object IPAddress, PrefixLength | "
-                 "Format-Table -HideTableHeaders"],
-                text=True, timeout=5,
-            )
-            for line in output.strip().splitlines():
-                parts = line.split()
-                if len(parts) == 2:
-                    ip_str, prefix = parts[0], int(parts[1])
-                    ip_int = struct.unpack("!I", socket.inet_aton(ip_str))[0]
-                    mask = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
-                    bcast_int = ip_int | (~mask & 0xFFFFFFFF)
-                    bcast_ip = socket.inet_ntoa(struct.pack("!I", bcast_int))
-                    if bcast_ip != "255.255.255.255" and ip_str != "127.0.0.1":
-                        addrs.append(bcast_ip)
-        except Exception:
-            pass
-
-    # Also try the cross-platform socket approach as fallback
-    if not addrs:
-        try:
-            hostname = socket.gethostname()
-            local_ip = socket.gethostbyname(hostname)
-            if local_ip and not local_ip.startswith("127."):
-                # Assume /24 subnet as common default
-                parts = local_ip.split(".")
-                parts[3] = "255"
-                addrs.append(".".join(parts))
-        except Exception:
-            pass
-
-    if not addrs:
-        addrs.append("255.255.255.255")
-
-    return list(set(addrs))
 
 
 class UDPSender:
@@ -162,108 +71,77 @@ class UDPReceiver:
         self.sock.close()
 
 
+def _get_local_ip() -> str:
+    """Get the local IP address used for LAN communication."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
 class Discovery:
-    """Discovers peer on the LAN via UDP subnet broadcast."""
+    """Discovers peer on the LAN via mDNS/zeroconf."""
 
     def __init__(self, on_peer_found: Callable[[str], None]):
         self.on_peer_found = on_peer_found
-        self._running = False
-        self._send_thread: threading.Thread | None = None
-        self._recv_thread: threading.Thread | None = None
-        self._sock_send: socket.socket | None = None
-        self._sock_recv: socket.socket | None = None
-        self._broadcast_addrs: list[str] = []
-
-    def start_ping(self):
-        """Start sending discovery pings (client mode)."""
-        self._broadcast_addrs = _get_broadcast_addresses()
-        logger.info("Discovery: sending PINGs to %s (port %d)",
-                     self._broadcast_addrs, config.DISCOVERY_PORT)
-
-        self._running = True
-        self._sock_send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock_send.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-        self._sock_recv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock_recv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock_recv.settimeout(1.0)
-        self._sock_recv.bind(("0.0.0.0", config.DISCOVERY_PORT + 1))
-
-        self._send_thread = threading.Thread(target=self._ping_loop, daemon=True)
-        self._recv_thread = threading.Thread(target=self._listen_pong, daemon=True)
-        self._send_thread.start()
-        self._recv_thread.start()
-
-    def _ping_loop(self):
-        ping_count = 0
-        while self._running:
-            pkt = protocol.encode(config.PKT_DISCOVERY_PING, channels=0, sample_rate=0)
-            for bcast in self._broadcast_addrs:
-                try:
-                    self._sock_send.sendto(pkt, (bcast, config.DISCOVERY_PORT))
-                except OSError as e:
-                    logger.debug("Discovery: failed to send PING to %s: %s", bcast, e)
-            ping_count += 1
-            if ping_count % 5 == 0:
-                logger.info("Discovery: sent %d rounds of PINGs, still searching...",
-                             ping_count)
-            time.sleep(config.DISCOVERY_INTERVAL)
-
-    def _listen_pong(self):
-        while self._running:
-            try:
-                data, addr = self._sock_recv.recvfrom(128)
-                pkt = protocol.decode(data)
-                if pkt and pkt.pkt_type == config.PKT_DISCOVERY_PONG:
-                    logger.info("Discovery: received PONG from %s", addr[0])
-                    self.on_peer_found(addr[0])
-            except socket.timeout:
-                continue
-            except OSError:
-                break
+        self._zeroconf: Zeroconf | None = None
+        self._browser: ServiceBrowser | None = None
+        self._service_info: ServiceInfo | None = None
 
     def start_listen(self):
-        """Start listening for discovery pings (server mode)."""
-        logger.info("Discovery: listening for PINGs on port %d",
-                     config.DISCOVERY_PORT)
+        """Register service via mDNS (server mode)."""
+        local_ip = _get_local_ip()
+        logger.info("Discovery: registering mDNS service (ip=%s)", local_ip)
 
-        self._running = True
-        self._sock_recv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock_recv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock_recv.settimeout(1.0)
-        self._sock_recv.bind(("0.0.0.0", config.DISCOVERY_PORT))
+        self._zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
+        self._service_info = ServiceInfo(
+            config.ZEROCONF_SERVICE_TYPE,
+            config.ZEROCONF_SERVICE_NAME,
+            parsed_addresses=[local_ip],
+            port=config.AUDIO_PORT,
+            properties={"version": "1"},
+        )
+        self._zeroconf.register_service(self._service_info)
+        logger.info("Discovery: service registered")
 
-        self._sock_send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    def start_search(self):
+        """Browse for mDNS services (client mode)."""
+        logger.info("Discovery: browsing for SoundBridge services...")
+        self._zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
+        self._browser = ServiceBrowser(
+            self._zeroconf,
+            config.ZEROCONF_SERVICE_TYPE,
+            handlers=[self._on_state_change],
+        )
 
-        self._recv_thread = threading.Thread(target=self._listen_ping_and_reply, daemon=True)
-        self._recv_thread.start()
-
-    def _listen_ping_and_reply(self):
-        while self._running:
-            try:
-                data, addr = self._sock_recv.recvfrom(128)
-                pkt = protocol.decode(data)
-                if pkt and pkt.pkt_type == config.PKT_DISCOVERY_PING:
-                    logger.info("Discovery: received PING from %s, sending PONG",
-                                 addr[0])
-                    pong = protocol.encode(config.PKT_DISCOVERY_PONG, channels=0, sample_rate=0)
-                    self._sock_send.sendto(pong, (addr[0], config.DISCOVERY_PORT + 1))
-                    self.on_peer_found(addr[0])
-            except socket.timeout:
-                continue
-            except OSError:
-                break
+    def _on_state_change(self, zeroconf: Zeroconf, service_type: str,
+                         name: str, state_change: ServiceStateChange):
+        if state_change != ServiceStateChange.Added:
+            return
+        info = zeroconf.get_service_info(service_type, name)
+        if info is None:
+            return
+        addresses = info.parsed_addresses(IPVersion.V4Only)
+        if not addresses:
+            return
+        ip = addresses[0]
+        logger.info("Discovery: found service '%s' at %s", name, ip)
+        self.on_peer_found(ip)
 
     def stop(self):
-        self._running = False
-        if self._send_thread:
-            self._send_thread.join(timeout=2.0)
-        if self._recv_thread:
-            self._recv_thread.join(timeout=2.0)
-        if self._sock_send:
-            self._sock_send.close()
-        if self._sock_recv:
-            self._sock_recv.close()
+        if self._browser:
+            self._browser.cancel()
+            self._browser = None
+        if self._service_info and self._zeroconf:
+            self._zeroconf.unregister_service(self._service_info)
+            self._service_info = None
+        if self._zeroconf:
+            self._zeroconf.close()
+            self._zeroconf = None
 
 
 class Heartbeat:
@@ -301,22 +179,29 @@ class Heartbeat:
         self._running = True
         self._last_received = time.time()
 
-        recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        recv_sock.settimeout(1.0)
-        recv_sock.bind(("0.0.0.0", config.HEARTBEAT_PORT))
+        self._recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._recv_sock.settimeout(1.0)
+        try:
+            self._recv_sock.bind(("0.0.0.0", config.HEARTBEAT_PORT))
+        except OSError as e:
+            logger.error("Heartbeat: failed to bind port %d: %s",
+                         config.HEARTBEAT_PORT, e)
+            self._recv_sock.close()
+            self._recv_sock = None
+            return
 
         self._recv_thread = threading.Thread(
-            target=self._monitor_loop, args=(recv_sock,), daemon=True
+            target=self._monitor_loop, daemon=True
         )
         self._check_thread = threading.Thread(target=self._check_loop, daemon=True)
         self._recv_thread.start()
         self._check_thread.start()
 
-    def _monitor_loop(self, sock: socket.socket):
+    def _monitor_loop(self):
         while self._running:
             try:
-                data, addr = sock.recvfrom(128)
+                data, addr = self._recv_sock.recvfrom(128)
                 pkt = protocol.decode(data)
                 if pkt and pkt.pkt_type == config.PKT_HEARTBEAT:
                     self._last_received = time.time()
@@ -324,7 +209,6 @@ class Heartbeat:
                 continue
             except OSError:
                 break
-        sock.close()
 
     def _check_loop(self):
         while self._running:
@@ -348,3 +232,5 @@ class Heartbeat:
             self._recv_thread.join(timeout=2.0)
         if self._sock:
             self._sock.close()
+        if hasattr(self, '_recv_sock') and self._recv_sock:
+            self._recv_sock.close()
