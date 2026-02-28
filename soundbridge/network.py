@@ -130,7 +130,9 @@ class Discovery:
             return
         ip = addresses[0]
         logger.info("Discovery: found service '%s' at %s", name, ip)
-        self.on_peer_found(ip)
+        # Run callback outside the ServiceBrowser thread so that
+        # stop() -> cancel() doesn't try to join the current thread.
+        threading.Thread(target=self.on_peer_found, args=(ip,), daemon=True).start()
 
     def stop(self):
         if self._browser:
