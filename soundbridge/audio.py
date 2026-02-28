@@ -5,6 +5,7 @@ Client (Windows): plays received audio to headphone, captures mic and sends it.
 """
 
 import logging
+import subprocess
 import sys
 import threading
 
@@ -108,6 +109,71 @@ class AudioPlayback:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+
+def find_monitor_source() -> str | None:
+    """Find the PulseAudio/PipeWire monitor source name for the default sink.
+
+    Uses pulsectl to query PulseAudio/PipeWire directly, bypassing
+    sounddevice/PortAudio limitations with PipeWire.
+    """
+    try:
+        import pulsectl
+        with pulsectl.Pulse("soundbridge-discover") as pulse:
+            default_sink = pulse.server_info().default_sink_name
+            for source in pulse.source_list():
+                if "monitor" in source.name and default_sink in source.name:
+                    return source.name
+    except Exception:
+        pass
+    return None
+
+
+class ParecCapture:
+    """Captures audio from a PulseAudio/PipeWire monitor source using parec."""
+
+    def __init__(self, callback, channels: int = config.CHANNELS_STEREO,
+                 device_name: str = ""):
+        self.callback = callback
+        self.channels = channels
+        self.device_name = device_name
+        self._process: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+        self._running = False
+
+    def start(self):
+        cmd = [
+            "parec",
+            f"--format=s16le",
+            f"--channels={self.channels}",
+            f"--rate={config.SAMPLE_RATE}",
+            f"--device={self.device_name}",
+        ]
+        self._process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        self._running = True
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread.start()
+
+    def _read_loop(self):
+        chunk_bytes = config.FRAME_SIZE * self.channels * config.BYTES_PER_SAMPLE
+        while self._running and self._process:
+            data = self._process.stdout.read(chunk_bytes)
+            if not data:
+                break
+            audio = np.frombuffer(data, dtype=np.int16).reshape(-1, self.channels)
+            self.callback(audio)
+
+    def stop(self):
+        self._running = False
+        if self._process:
+            self._process.terminate()
+            self._process.wait()
+            self._process = None
+        if self._thread:
+            self._thread.join(timeout=2)
+            self._thread = None
 
 
 def find_pulse_monitor() -> int | None:

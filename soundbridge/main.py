@@ -10,7 +10,10 @@ import numpy as np
 
 from . import config
 from . import protocol
-from .audio import AudioCapture, AudioPlayback, VirtualMicSource, find_pulse_monitor
+from .audio import (
+    AudioCapture, AudioPlayback, ParecCapture, VirtualMicSource,
+    find_monitor_source,
+)
 from .network import UDPSender, UDPReceiver, Discovery, Heartbeat
 from .state import ConnectionState
 
@@ -27,7 +30,7 @@ class SoundBridgeServer:
         self.gui_callback = gui_callback
 
         # Audio
-        self._audio_capture: AudioCapture | None = None
+        self._audio_capture: ParecCapture | None = None
         self._audio_sender: UDPSender | None = None
         self._mic_receiver: UDPReceiver | None = None
         self._mic_playback: AudioPlayback | None = None
@@ -81,18 +84,18 @@ class SoundBridgeServer:
         self._heartbeat.start_monitor()
 
         # Capture system audio and send to client
-        monitor_device = find_pulse_monitor()
-        if monitor_device is None:
-            logger.warning("No PulseAudio monitor found. "
+        monitor_source = find_monitor_source()
+        if monitor_source is None:
+            logger.warning("No PulseAudio/PipeWire monitor found. "
                            "System audio capture unavailable.")
-            logger.info("Tip: Make sure PulseAudio is running.")
+            logger.info("Tip: Make sure PulseAudio or PipeWire is running.")
         else:
-            logger.info("Capturing system audio (device %s)", monitor_device)
+            logger.info("Capturing system audio (%s)", monitor_source)
             self._audio_sender = UDPSender(self.peer_ip, config.AUDIO_PORT)
-            self._audio_capture = AudioCapture(
+            self._audio_capture = ParecCapture(
                 callback=self._on_audio_captured,
                 channels=config.CHANNELS_STEREO,
-                device=monitor_device,
+                device_name=monitor_source,
             )
             self._audio_capture.start()
 
