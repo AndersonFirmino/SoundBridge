@@ -3,6 +3,7 @@
 import ctypes
 import ctypes.util
 import logging
+import os
 import sys
 
 import numpy as np
@@ -29,6 +30,17 @@ def _load_libopus():
         if path:
             try:
                 _lib = ctypes.cdll.LoadLibrary(path)
+                return _lib
+            except OSError:
+                continue
+
+    # Try bundled DLL next to this file (ships with the project)
+    _this_dir = os.path.dirname(os.path.abspath(__file__))
+    for name in ["opus.dll", "libopus-0.dll", "libopus.so.0"]:
+        bundled = os.path.join(_this_dir, name)
+        if os.path.isfile(bundled):
+            try:
+                _lib = ctypes.cdll.LoadLibrary(bundled)
                 return _lib
             except OSError:
                 continue
