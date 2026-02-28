@@ -66,6 +66,8 @@ class AudioPlayback:
         self._buffer: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._volume = 1.0
+        self._prebuffer_count = 3
+        self._prebuffering = True
 
     def start(self):
         self._stream = sd.OutputStream(
@@ -74,12 +76,19 @@ class AudioPlayback:
             channels=self.channels,
             dtype=config.SAMPLE_FORMAT,
             device=self.device,
+            latency="low",
             callback=self._sd_callback,
         )
         self._stream.start()
 
     def _sd_callback(self, outdata, frames, time_info, status):
         with self._lock:
+            if self._prebuffering:
+                if len(self._buffer) >= self._prebuffer_count:
+                    self._prebuffering = False
+                else:
+                    outdata[:] = np.zeros((frames, self.channels), dtype=np.int16)
+                    return
             if self._buffer:
                 chunk = self._buffer.pop(0)
                 if self._volume != 1.0:
@@ -96,8 +105,7 @@ class AudioPlayback:
     def feed(self, audio_data: np.ndarray):
         """Feed audio data into the playback buffer."""
         with self._lock:
-            # Keep buffer small to minimize latency (max ~100ms)
-            if len(self._buffer) < 5:
+            if len(self._buffer) < 15:
                 self._buffer.append(audio_data)
 
     def set_volume(self, volume: float):
@@ -161,6 +169,7 @@ class ParecCapture:
             f"--channels={self.channels}",
             f"--rate={config.SAMPLE_RATE}",
             f"--device={self.device_name}",
+            "--latency-msec=20",
         ]
         self._process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

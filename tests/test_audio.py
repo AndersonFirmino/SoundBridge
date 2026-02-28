@@ -130,15 +130,40 @@ class TestListDevices:
 
 class TestAudioPlayback:
 
-    def test_feed_buffer_max_five_frames(self):
-        """Buffer should not exceed 5 frames to keep latency low."""
+    def test_feed_buffer_max_fifteen_frames(self):
+        """Buffer should not exceed 15 frames."""
         playback = AudioPlayback(channels=config.CHANNELS_STEREO)
         frame = np.zeros((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
 
-        for _ in range(10):
+        for _ in range(20):
             playback.feed(frame)
 
-        assert len(playback._buffer) == 5
+        assert len(playback._buffer) == 15
+
+    def test_prebuffering_outputs_silence_until_threshold(self):
+        """Callback should output silence until prebuffer_count frames are buffered."""
+        playback = AudioPlayback(channels=config.CHANNELS_STEREO)
+        frame = np.zeros((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
+        outdata = np.ones((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
+
+        # Feed 2 frames (below prebuffer_count=3)
+        playback.feed(frame)
+        playback.feed(frame)
+
+        # Callback should output silence and not consume buffer
+        playback._sd_callback(outdata, config.FRAME_SIZE, None, None)
+        assert np.all(outdata == 0)
+        assert len(playback._buffer) == 2
+        assert playback._prebuffering is True
+
+        # Feed 3rd frame — reaches threshold
+        playback.feed(frame)
+
+        # Now callback should exit prebuffering and consume a frame
+        outdata = np.ones((config.FRAME_SIZE, config.CHANNELS_STEREO), dtype=np.int16)
+        playback._sd_callback(outdata, config.FRAME_SIZE, None, None)
+        assert playback._prebuffering is False
+        assert len(playback._buffer) == 2
 
     def test_set_volume_clamps(self):
         """Volume must be clamped between 0.0 and 1.0."""
@@ -210,6 +235,7 @@ class TestParecCapture:
         assert f"--channels={config.CHANNELS_STEREO}" in cmd
         assert f"--rate={config.SAMPLE_RATE}" in cmd
         assert "--device=alsa_output.pci.monitor" in cmd
+        assert "--latency-msec=20" in cmd
 
     @patch("soundbridge.audio.subprocess.Popen")
     def test_stop_terminates_process(self, mock_popen):
