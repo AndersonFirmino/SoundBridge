@@ -116,13 +116,26 @@ def find_monitor_source() -> str | None:
 
     Uses pulsectl to query PulseAudio/PipeWire directly, bypassing
     sounddevice/PortAudio limitations with PipeWire.
+
+    Skips the SoundBridge null-sink to avoid capturing its own monitor.
+    If the default sink is the null-sink (e.g. after a crash), falls back
+    to the first real hardware monitor source.
     """
     try:
         import pulsectl
         with pulsectl.Pulse("soundbridge-discover") as pulse:
             default_sink = pulse.server_info().default_sink_name
+
+            # Skip if default sink is our own null-sink
+            if "soundbridge" not in default_sink:
+                for source in pulse.source_list():
+                    if "monitor" in source.name and default_sink in source.name:
+                        return source.name
+
+            # Fallback: find any hardware monitor (not ours)
             for source in pulse.source_list():
-                if "monitor" in source.name and default_sink in source.name:
+                if ("monitor" in source.name
+                        and "soundbridge" not in source.name):
                     return source.name
     except Exception:
         pass

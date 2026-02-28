@@ -83,8 +83,14 @@ class SoundBridgeServer:
         self._heartbeat.start_sender()
         self._heartbeat.start_monitor()
 
-        # Capture system audio and send to client
+        # Find monitor BEFORE creating null-sink (PipeWire changes default sink)
         monitor_source = find_monitor_source()
+
+        # Setup virtual mic source (Linux) — creates null-sink
+        self._virtual_mic = VirtualMicSource()
+        self._virtual_mic.start()
+
+        # Capture system audio and send to client
         if monitor_source is None:
             logger.warning("No PulseAudio/PipeWire monitor found. "
                            "System audio capture unavailable.")
@@ -98,10 +104,6 @@ class SoundBridgeServer:
                 device_name=monitor_source,
             )
             self._audio_capture.start()
-
-        # Setup virtual mic source (Linux)
-        self._virtual_mic = VirtualMicSource()
-        self._virtual_mic.start()
 
         if self._virtual_mic.active:
             self._mic_playback = PacatPlayback(

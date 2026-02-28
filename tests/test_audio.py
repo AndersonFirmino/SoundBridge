@@ -79,6 +79,17 @@ class TestFindMonitorSource:
             result = fms()
         assert result is None
 
+    def test_skips_soundbridge_null_sink_as_default(self):
+        mock_pulsectl = self._make_mock_pulsectl(
+            "soundbridge_virtual_mic",
+            ["alsa_output.pci-0000_00_1f.3.analog-stereo.monitor",
+             "soundbridge_virtual_mic.monitor"],
+        )
+        with patch.dict(sys.modules, {"pulsectl": mock_pulsectl}):
+            from soundbridge.audio import find_monitor_source as fms
+            result = fms()
+        assert result == "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"
+
     def test_returns_none_when_pulsectl_import_fails(self):
         with patch.dict(sys.modules, {"pulsectl": None}):
             result = find_monitor_source()
