@@ -1,5 +1,3 @@
-# SoundBridge
-
 ![SoundBridge](soundbridge_pic.png)
 
 Audio bridge between machines on the same LAN via UDP. The server (Linux) captures system audio and sends it to the client (Windows), which plays it on headphones. The Windows microphone comes back as a virtual input device on Linux, available in apps like Discord, Google Meet, etc.
