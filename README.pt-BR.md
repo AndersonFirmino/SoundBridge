@@ -1,9 +1,5 @@
 # SoundBridge
 
-Use seu headset Windows como entrada/saida de audio no Linux pela LAN — zero config, baixa latencia, codec Opus.
-
-[Read in English](README.md)
-
 ![SoundBridge](soundbridge_pic.png)
 
 Audio bridge entre maquinas na mesma LAN via UDP. O server (Linux) captura audio do sistema e envia para o client (Windows), que reproduz no headphone. O microfone do Windows volta como dispositivo de entrada virtual no Linux, disponivel em apps como Discord, Google Meet, etc.
