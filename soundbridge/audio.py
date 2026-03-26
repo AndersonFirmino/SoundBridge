@@ -326,19 +326,49 @@ class VirtualMicSource:
     def active(self) -> bool:
         return self._module_id is not None and self._fifo_fd is not None
 
-    def start(self):
-        if sys.platform != "linux":
-            return
-
+    def _cleanup(self):
+        """Release FIFO, Pulse client, and loaded module safely."""
         import os
-        import stat
 
-        # Clean up stale FIFO
+        fifo_fd = self._fifo_fd
+        module_id = self._module_id
+        pulse = self._pulse
+
+        self._fifo_fd = None
+        self._module_id = None
+        self._pulse = None
+
+        if fifo_fd is not None:
+            try:
+                os.close(fifo_fd)
+            except OSError:
+                pass
+
+        if pulse and module_id is not None:
+            try:
+                pulse.module_unload(module_id)
+            except Exception:
+                pass
+
+        if pulse:
+            try:
+                pulse.close()
+            except Exception:
+                pass
+
         try:
             if os.path.exists(self.FIFO_PATH):
                 os.unlink(self.FIFO_PATH)
         except OSError:
             pass
+
+    def start(self):
+        if sys.platform != "linux":
+            return
+
+        self._cleanup()
+
+        import os
 
         try:
             import pulsectl
@@ -381,9 +411,8 @@ class VirtualMicSource:
             logger.info("Virtual mic: pipe-source at %s", self.FIFO_PATH)
 
         except Exception as e:
+            self._cleanup()
             logger.error("Failed to create virtual mic source: %s", e)
-            self._module_id = None
-            self._fifo_fd = None
 
     def feed(self, audio_data: np.ndarray):
         """Write PCM directly to the FIFO. Drops frames if pipe is full
@@ -398,28 +427,4 @@ class VirtualMicSource:
                 pass
 
     def stop(self):
-        import os
-
-        if self._fifo_fd is not None:
-            try:
-                os.close(self._fifo_fd)
-            except OSError:
-                pass
-            self._fifo_fd = None
-
-        if self._pulse and self._module_id is not None:
-            try:
-                self._pulse.module_unload(self._module_id)
-            except Exception:
-                pass
-            self._module_id = None
-
-        if self._pulse:
-            self._pulse.close()
-            self._pulse = None
-
-        try:
-            if os.path.exists(self.FIFO_PATH):
-                os.unlink(self.FIFO_PATH)
-        except OSError:
-            pass
+        self._cleanup()
