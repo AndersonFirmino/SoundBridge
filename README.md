@@ -1,6 +1,6 @@
 ![SoundBridge](soundbridge_pic.png)
 
-Audio bridge between machines on the same LAN via UDP. The server (Linux) captures system audio and sends it to the client (Windows), which plays it on headphones. The Windows microphone comes back as a virtual input device on Linux, available in apps like Discord, Google Meet, etc.
+Audio bridge between machines on the same LAN via UDP. The server (Linux) captures system audio and sends it to the client (Windows), which plays it on headphones. The Windows microphone comes back as a virtual input device on Linux, and the Windows webcam can also be exposed as a virtual camera on Linux for apps like Discord, Google Meet, OBS, etc.
 
 ## Features
 
@@ -9,6 +9,7 @@ Audio bridge between machines on the same LAN via UDP. The server (Linux) captur
 - **Adaptive jitter buffer** — RFC 3550, automatically adjusts buffer depth based on network jitter
 - **Sequence numbers** — gap detection to trigger PLC on lost frames
 - **Virtual mic via pipe-source** — FIFO direct to PipeWire, minimal latency (~42ms buffer), Discord/Meet see it as a real microphone
+- **Optional webcam sharing** — Windows webcam -> `ffmpeg` -> UDP -> Linux `v4l2loopback` virtual camera
 - **Zero config** — automatic discovery via mDNS (zeroconf), no manual IPs
 - **Heartbeat** — disconnect detection in 5s, automatic reconnection
 
@@ -24,6 +25,10 @@ System Audio (parec)                        Headphone Playback
 Virtual Mic (pipe-source FIFO)              Mic Capture
         ▲ Opus decode                          │ Opus encode
         └──── UDP :4411 (mono, 48kHz) ─────────┘
+
+Virtual Camera (/dev/videoX)                Webcam Capture (ffmpeg/dshow)
+        ▲ ffmpeg decode                        │ ffmpeg encode
+        └──── UDP :4412 (H.264/MPEG-TS) ───────┘
 
 mDNS (zeroconf)  ◄──── service discovery ──►  mDNS (zeroconf)
 Heartbeat        ◄──── UDP :4413 ──────────►  Heartbeat
@@ -54,13 +59,21 @@ Packet types:
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (package manager)
-- **Linux**: `libopus0` and PipeWire (or PulseAudio)
+- **Linux**: `libopus0`, PipeWire (or PulseAudio), `ffmpeg`, `v4l2loopback-dkms`
 - **Windows**: `opus.dll` (already bundled in the project)
 
 ```bash
 # Linux — install libopus (probably already installed via PipeWire)
 sudo apt install libopus0
+
+# Linux webcam support
+sudo apt install ffmpeg v4l2loopback-dkms
+
+# Create the virtual camera used by SoundBridge
+sudo modprobe v4l2loopback video_nr=10 card_label="SoundBridge Camera" exclusive_caps=1
 ```
+
+On Windows, install `ffmpeg` and make sure it is available in `PATH`.
 
 ## Installation
 
@@ -98,10 +111,17 @@ sudo netfilter-persistent save
 
 ```bash
 # With GUI
+# Webcam controls are available directly in the window.
 uv run soundbridge server
 
 # Without GUI
 uv run soundbridge server --no-gui
+
+# Without GUI + virtual camera
+uv run soundbridge server --no-gui --webcam
+
+# Virtual camera on a custom device
+uv run soundbridge server --webcam --virtual-camera-device /dev/video10
 
 # List audio devices
 uv run soundbridge server --list-devices
@@ -112,14 +132,32 @@ uv run soundbridge server --list-devices
 ```powershell
 # With GUI — double click soundbridge-client.bat
 # Or via terminal:
+# Webcam controls are available directly in the window.
 uv run soundbridge client
 
 # Without GUI
 uv run soundbridge client --no-gui
 
+# Without GUI + webcam sharing enabled
+uv run soundbridge client --no-gui --webcam
+
 # Connect directly to an IP (skip discovery)
 uv run soundbridge client --ip 192.168.0.5
+
+# Choose camera, size and FPS
+uv run soundbridge client --webcam --camera-device "Integrated Camera" --video-size 1280x720 --video-fps 30
+
+# List available cameras
+uv run soundbridge client --list-cameras
 ```
+
+## Webcam notes
+
+- The webcam path is separate from the audio protocol; audio still works if webcam startup fails.
+- In GUI mode, you do not need `--webcam`; enable webcam or virtual camera from the window controls.
+- The client GUI lets you enable webcam sharing, pick a camera, and choose resolution/FPS.
+- The server GUI lets you enable the virtual camera and verify `/dev/videoX` setup.
+- In GUI mode, changing camera, resolution, FPS, or virtual camera device restarts only the video pipeline and keeps audio connected.
 
 ## Tests
 
@@ -133,7 +171,9 @@ tests/
 ├── test_opus.py        # roundtrip encode/decode, PLC, compression ratio
 ├── test_protocol.py    # 10-byte header, seq number, encode/decode
 ├── test_audio.py       # jitter buffer, prebuffering, devices, parec/pacat
+├── test_main.py        # lifecycle integration for audio + webcam control
 ├── test_network.py     # UDPSender, Discovery (zeroconf), heartbeat
+├── test_video.py       # ffmpeg command builders, validation, video lifecycle
 └── test_state.py       # ConnectionState enum
 ```
 
@@ -150,6 +190,7 @@ soundbridge/
 │   ├── protocol.py         # binary protocol encode/decode (10B header + seq)
 │   ├── config.py           # constants (ports, sample rate, packet types)
 │   ├── state.py            # ConnectionState enum
+│   ├── video.py            # ffmpeg helpers, webcam sender, virtual camera receiver
 │   ├── gui.py              # CustomTkinter + system tray
 │   └── opus.dll            # libopus 1.5.2 win-x64 (bundled)
 └── tests/
@@ -165,6 +206,7 @@ soundbridge/
 | `CHANNELS_MONO` | 1 | Microphone |
 | `AUDIO_PORT` | 4410 | UDP — system audio |
 | `MIC_PORT` | 4411 | UDP — microphone |
+| `VIDEO_PORT` | 4412 | UDP — webcam stream |
 | `HEARTBEAT_PORT` | 4413 | UDP — heartbeat |
 | `HEARTBEAT_TIMEOUT` | 5.0s | Time without heartbeat = disconnect |
 

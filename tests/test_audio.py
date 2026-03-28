@@ -3,7 +3,7 @@
 import collections
 import sys
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 import numpy as np
 import pytest
@@ -16,6 +16,7 @@ from soundbridge.audio import (
     AudioPlayback,
     PacatPlayback,
     ParecCapture,
+    VirtualMicSource,
 )
 from soundbridge import config
 
@@ -355,3 +356,77 @@ class TestPacatPlayback:
         mock_proc.stdin.close.assert_called_once()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once()
+
+
+class TestVirtualMicSource:
+
+    def test_start_cleans_up_on_fifo_open_failure(self):
+        """start() should unload the Pulse module on partial setup failure."""
+        mock_pulsectl = MagicMock()
+        mock_pulse = MagicMock()
+        mock_pulsectl.Pulse.return_value = mock_pulse
+        mock_pulse.module_list.return_value = []
+        mock_pulse.module_load.return_value = 123
+
+        with patch.dict(sys.modules, {"pulsectl": mock_pulsectl}):
+            with patch("os.path.exists", return_value=False):
+                with patch("os.open", side_effect=OSError("open failed")):
+                    source = VirtualMicSource()
+                    source.start()
+
+        assert source.active is False
+        mock_pulse.module_unload.assert_called_once_with(123)
+        mock_pulse.close.assert_called_once()
+
+        source.stop()
+        mock_pulse.module_unload.assert_called_once_with(123)
+        mock_pulse.close.assert_called_once()
+
+    def test_stop_cleans_up_resources_after_successful_start(self):
+        """stop() should release the FIFO, Pulse client, and FIFO path."""
+        mock_pulsectl = MagicMock()
+        mock_pulse = MagicMock()
+        mock_pulsectl.Pulse.return_value = mock_pulse
+        mock_pulse.module_list.return_value = []
+        mock_pulse.module_load.return_value = 123
+
+        with patch.dict(sys.modules, {"pulsectl": mock_pulsectl}):
+            with patch("os.path.exists", side_effect=[False, True]):
+                with patch("os.open", return_value=10):
+                    with patch("os.close") as mock_close:
+                        with patch("os.unlink") as mock_unlink:
+                            source = VirtualMicSource()
+                            source.start()
+                            source.stop()
+
+        mock_close.assert_called_once_with(10)
+        mock_unlink.assert_called_once_with(VirtualMicSource.FIFO_PATH)
+        mock_pulse.module_unload.assert_called_once_with(123)
+        mock_pulse.close.assert_called_once()
+
+    def test_start_is_restart_safe(self):
+        """start() should clean up active resources before reinitializing."""
+        mock_pulsectl = MagicMock()
+        first_pulse = MagicMock()
+        second_pulse = MagicMock()
+        mock_pulsectl.Pulse.side_effect = [first_pulse, second_pulse]
+        first_pulse.module_list.return_value = []
+        second_pulse.module_list.return_value = []
+        first_pulse.module_load.return_value = 123
+        second_pulse.module_load.return_value = 456
+
+        with patch.dict(sys.modules, {"pulsectl": mock_pulsectl}):
+            with patch("os.path.exists", return_value=False):
+                with patch("os.open", side_effect=[10, 11]):
+                    with patch("os.close") as mock_close:
+                        source = VirtualMicSource()
+                        source.start()
+                        source.start()
+                        source.stop()
+
+        assert source.active is False
+        assert mock_close.call_args_list == [call(10), call(11)]
+        first_pulse.module_unload.assert_called_once_with(123)
+        first_pulse.close.assert_called_once()
+        second_pulse.module_unload.assert_called_once_with(456)
+        second_pulse.close.assert_called_once()
