@@ -16,6 +16,7 @@ from soundbridge.audio import (
     AudioPlayback,
     PacatPlayback,
     ParecCapture,
+    WasapiLoopbackCapture,
 )
 from soundbridge import config
 
@@ -355,3 +356,71 @@ class TestPacatPlayback:
         mock_proc.stdin.close.assert_called_once()
         mock_proc.terminate.assert_called_once()
         mock_proc.wait.assert_called_once()
+
+
+class TestWasapiLoopbackCapture:
+
+    def _fake_soundcard(self, value):
+        sc = MagicMock()
+        speaker = MagicMock()
+        speaker.id = "spk-1"
+        speaker.name = "Fake Speaker"
+        sc.default_speaker.return_value = speaker
+        recorder = MagicMock()
+
+        def record(numframes):
+            time.sleep(0.001)
+            return np.full((numframes, 2), value, dtype=np.float32)
+
+        recorder.record.side_effect = record
+        mic = MagicMock()
+        mic.recorder.return_value.__enter__ = MagicMock(return_value=recorder)
+        mic.recorder.return_value.__exit__ = MagicMock(return_value=False)
+        sc.get_microphone.return_value = mic
+        return sc, mic
+
+    def _capture(self, value):
+        sc, mic = self._fake_soundcard(value)
+        frames = []
+        with patch.dict(sys.modules, {"soundcard": sc}), \
+                patch("soundbridge.audio.ctypes.WinDLL", create=True) as dll:
+            dll.return_value.CoInitializeEx.return_value = 0
+            cap = WasapiLoopbackCapture(callback=frames.append)
+            cap.start()
+            deadline = time.time() + 2
+            while not frames and time.time() < deadline:
+                time.sleep(0.01)
+            cap.stop()
+        assert cap._thread is None
+        assert frames
+        return frames[0], sc, mic
+
+    def test_scales_to_int16(self):
+        frame, sc, mic = self._capture(0.5)
+        assert frame.shape == (config.FRAME_SIZE, 2)
+        assert frame.dtype == np.int16
+        assert int(frame[0, 0]) == 16383
+        sc.get_microphone.assert_called_with(id="spk-1", include_loopback=True)
+        assert "blocksize" not in mic.recorder.call_args.kwargs
+
+    def test_clips_positive(self):
+        frame, _, _ = self._capture(1.5)
+        assert int(frame[0, 0]) == 32767
+
+    def test_clips_negative(self):
+        frame, _, _ = self._capture(-1.5)
+        assert int(frame[0, 0]) == -32767
+
+    def test_stop_ends_thread(self):
+        sc, _ = self._fake_soundcard(0.0)
+        with patch.dict(sys.modules, {"soundcard": sc}), \
+                patch("soundbridge.audio.ctypes.WinDLL", create=True) as dll:
+            dll.return_value.CoInitializeEx.return_value = 1
+            cap = WasapiLoopbackCapture(callback=lambda f: None)
+            cap.start()
+            thread = cap._thread
+            time.sleep(0.05)
+            cap.stop()
+        assert not thread.is_alive()
+        dll.return_value.CoInitializeEx.assert_called_once_with(None, 0)
+        dll.return_value.CoUninitialize.assert_called_once_with()
