@@ -1,10 +1,12 @@
 """Audio capture and playback for SoundBridge.
 
 Server (Linux): captures system audio via PulseAudio monitor, receives remote mic as virtual source.
-Client (Windows): plays received audio to headphone, captures mic and sends it.
+Server (Windows): captures system audio via WASAPI loopback (soundcard).
+Client (Windows/macOS/Linux): plays received audio to headphone, optionally captures mic and sends it.
 """
 
 import collections
+import ctypes
 import logging
 import subprocess
 import sys
@@ -17,6 +19,11 @@ import sounddevice as sd
 from . import config
 
 logger = logging.getLogger(__name__)
+
+# soundcard initializes its module-level COM library on the importing thread.
+# Import on the application thread, not on a short-lived capture worker.
+if sys.platform == "win32":
+    import soundcard  # noqa: F401
 
 
 class AudioCapture:
@@ -52,10 +59,12 @@ class AudioCapture:
         self.callback(indata.copy())
 
     def stop(self):
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
 
 
 class AudioPlayback:
@@ -220,6 +229,73 @@ class ParecCapture:
             self._process.terminate()
             self._process.wait()
             self._process = None
+        if self._thread:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+
+class WasapiLoopbackCapture:
+    """Captures the default output device (system audio) on Windows via WASAPI loopback.
+
+    Uses the Windows-only `soundcard` package. Each capture worker owns a
+    balanced COM initialization, including workers created after reconnect.
+    """
+
+    def __init__(self, callback, channels: int = config.CHANNELS_STEREO):
+        self.callback = callback
+        self.channels = channels
+        self._thread: threading.Thread | None = None
+        self._running = False
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+
+    def _capture_loop(self):
+        ole32 = ctypes.WinDLL("ole32")
+        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        # A new worker uses the multithreaded apartment. S_OK and S_FALSE both
+        # require a matching CoUninitialize on this very same thread.
+        result = ole32.CoInitializeEx(None, 0)
+        if result not in (0, 1):
+            logger.error("COM initialization failed: 0x%08x", result & 0xffffffff)
+            return
+        try:
+            self._record_loop()
+        finally:
+            ole32.CoUninitialize()
+
+    def _record_loop(self):
+        import warnings
+        import soundcard as sc
+        # soundcard sets this warning to "always" on import; filter after import.
+        try:
+            from soundcard.mediafoundation import SoundcardRuntimeWarning
+            warnings.filterwarnings("ignore", category=SoundcardRuntimeWarning)
+        except ImportError:
+            pass
+
+        while self._running:
+            try:
+                speaker = sc.default_speaker()
+                mic = sc.get_microphone(id=str(speaker.id), include_loopback=True)
+                logger.info("Capturing system audio (WASAPI loopback of %s)",
+                            speaker.name)
+                with mic.recorder(samplerate=config.SAMPLE_RATE,
+                                  channels=self.channels) as recorder:
+                    while self._running:
+                        data = recorder.record(numframes=config.FRAME_SIZE)
+                        pcm = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16)
+                        self.callback(pcm)
+            except Exception as e:
+                logger.error("WASAPI loopback capture error: %s", e)
+                if self._running:
+                    time.sleep(1)
+
+    def stop(self):
+        self._running = False
         if self._thread:
             self._thread.join(timeout=2)
             self._thread = None

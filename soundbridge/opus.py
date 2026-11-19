@@ -55,6 +55,15 @@ def _load_libopus():
         ]
     elif sys.platform == "win32":
         direct = ["opus.dll", "libopus-0.dll"]
+    elif sys.platform == "darwin":
+        direct = [
+            "/opt/homebrew/lib/libopus.0.dylib",
+            "/opt/homebrew/lib/libopus.dylib",
+            "/usr/local/lib/libopus.0.dylib",
+            "/usr/local/lib/libopus.dylib",
+            "/opt/local/lib/libopus.0.dylib",
+            "/opt/local/lib/libopus.dylib",
+        ]
 
     for path in direct:
         try:
@@ -63,9 +72,28 @@ def _load_libopus():
         except OSError:
             continue
 
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            prefix = subprocess.run(
+                ["brew", "--prefix", "opus"], capture_output=True,
+                text=True, timeout=5,
+            ).stdout.strip()
+            if prefix:
+                for name in ["libopus.0.dylib", "libopus.dylib"]:
+                    try:
+                        _lib = ctypes.cdll.LoadLibrary(
+                            os.path.join(prefix, "lib", name))
+                        return _lib
+                    except OSError:
+                        continue
+        except Exception:
+            pass
+
     raise OSError(
         "libopus not found. Install it:\n"
         "  Linux: sudo apt install libopus0\n"
+        "  macOS: brew install opus\n"
         "  Windows: place opus.dll in PATH or project folder"
     )
 

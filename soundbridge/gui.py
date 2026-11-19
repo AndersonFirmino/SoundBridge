@@ -172,6 +172,7 @@ class SoundBridgeGUI:
             server_ip = getattr(self.args, "ip", None)
             self.bridge = SoundBridgeClient(
                 server_ip=server_ip, gui_callback=gui_callback,
+                mic_enabled=not getattr(self.args, "no_mic", False),
             )
 
         threading.Thread(target=self.bridge.start, daemon=True).start()

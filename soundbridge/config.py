@@ -21,6 +21,8 @@ HEADER_SIZE = 10  # magic(2) + type(1) + channels(1) + sample_rate(2) + seq(2) +
 PKT_AUDIO_DATA = 0x01
 PKT_MIC_DATA = 0x02
 PKT_HEARTBEAT = 0x03
+PKT_DISCOVERY_REQUEST = 0x04
+PKT_DISCOVERY_RESPONSE = 0x05
 
 # Timing
 HEARTBEAT_INTERVAL = 1.0  # seconds
